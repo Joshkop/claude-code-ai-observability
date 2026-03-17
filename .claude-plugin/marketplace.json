@@ -1,9 +1,19 @@
 {
   "name": "claude-code-sentry-monitor",
-  "description": "Sentry AI Agent Monitoring plugins",
-  "plugins": {
-    "claude-code-sentry-monitor": {
-      "version": "1.0.0"
+  "description": "Sentry AI Agent Monitoring for Claude Code",
+  "owner": {
+    "name": "Sergiy Dybskiy"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-sentry-monitor",
+      "description": "Traces Claude Code sessions and tool calls as OpenTelemetry spans in Sentry.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Sergiy Dybskiy"
+      },
+      "source": "..",
+      "category": "monitoring"
     }
-  }
+  ]
 }
