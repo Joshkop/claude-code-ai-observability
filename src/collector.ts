@@ -15,7 +15,7 @@ function safeJsonParse(str: string): Record<string, unknown> | null {
 }
 
 function addTimestamp(event: Record<string, unknown>): Record<string, unknown> {
-  return { ...event, _ts: Date.now() / 1000 };
+  return { ...event, _ts: Date.now() };
 }
 
 // ── Transcript token extraction ──────────────────────────────
@@ -156,6 +156,7 @@ async function processBatch(filePath: string, config: ResolvedPluginConfig): Pro
 
   const firstTs = (events[0]._ts as number) || Date.now() / 1000;
   const lastTs = (events[events.length - 1]._ts as number) || Date.now() / 1000;
+
 
   const rootAttrs: Record<string, string | number | boolean> = {
     "gen_ai.agent.name": "claude-code",

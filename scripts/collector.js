@@ -13,7 +13,7 @@ function safeJsonParse(str) {
     }
 }
 function addTimestamp(event) {
-    return { ...event, _ts: Date.now() / 1000 };
+    return { ...event, _ts: Date.now() };
 }
 function extractTokensFromTranscript(transcriptPath) {
     if (!existsSync(transcriptPath))
