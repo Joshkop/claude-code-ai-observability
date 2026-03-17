@@ -26,6 +26,7 @@ interface TokenData {
   model: string | null;
   prompt: string | null;
   lastResponse: string | null;
+  turnResponses: string[];
 }
 
 function extractTokensFromTranscript(transcriptPath: string): TokenData | null {
@@ -36,6 +37,9 @@ function extractTokensFromTranscript(transcriptPath: string): TokenData | null {
   let model: string | null = null;
   let prompt: string | null = null;
   let lastResponse: string | null = null;
+  const turnResponses: string[] = [];
+  let currentTurnResponse: string | null = null;
+  let inTurn = false;
 
   const content = readFileSync(transcriptPath, "utf-8");
   for (const line of content.split("\n")) {
@@ -43,18 +47,32 @@ function extractTokensFromTranscript(transcriptPath: string): TokenData | null {
     const obj = safeJsonParse(line);
     if (!obj) continue;
 
-    // Capture first user message as prompt
-    if (obj.type === "user" && !prompt) {
+    // Capture first user message as prompt; track turn boundaries
+    if (obj.type === "user") {
       const msg = (obj as any).message?.content ?? (obj as any).message;
-      prompt = typeof msg === "string" ? msg : JSON.stringify(msg);
+      if (!prompt) {
+        prompt = typeof msg === "string" ? msg : JSON.stringify(msg);
+      }
+      // Close previous turn
+      if (inTurn && currentTurnResponse !== null) {
+        turnResponses.push(currentTurnResponse);
+      }
+      currentTurnResponse = null;
+      inTurn = true;
     }
 
-    // Capture last assistant text as response
+    // Capture assistant text responses
     if (obj.type === "assistant" && Array.isArray((obj as any).message?.content)) {
       const texts = (obj as any).message.content
         .filter((c: any) => c.type === "text" && c.text)
         .map((c: any) => c.text);
-      if (texts.length) lastResponse = texts.join("\n");
+      if (texts.length) {
+        const response = texts.join("\n");
+        lastResponse = response;
+        if (inTurn) {
+          currentTurnResponse = response; // keep updating to get the last one
+        }
+      }
     }
 
     if (obj.type !== "assistant" || !(obj as any).message?.usage) continue;
@@ -71,7 +89,12 @@ function extractTokensFromTranscript(transcriptPath: string): TokenData | null {
     }
   }
 
-  return { inputTokens, outputTokens, model, prompt, lastResponse };
+  // Close last turn
+  if (inTurn && currentTurnResponse !== null) {
+    turnResponses.push(currentTurnResponse);
+  }
+
+  return { inputTokens, outputTokens, model, prompt, lastResponse, turnResponses };
 }
 
 // ── Tool event pairing ───────────────────────────────────────
@@ -125,6 +148,37 @@ function pairToolEvents(events: Record<string, unknown>[]): PairedToolCall[] {
   return completed;
 }
 
+// ── Tool span creation helper ────────────────────────────────
+
+function createToolSpan(tool: PairedToolCall, config: ResolvedPluginConfig): void {
+  const attrs: Record<string, string | number | boolean> = {
+    "gen_ai.tool.name": tool.tool_name,
+  };
+
+  if (config.recordInputs && tool.input) {
+    attrs["gen_ai.tool.input"] = serializeAttribute(tool.input, config.maxAttributeLength);
+  }
+  if (config.recordOutputs && tool.output) {
+    attrs["gen_ai.tool.output"] = serializeAttribute(tool.output, config.maxAttributeLength);
+  }
+  if (tool.tool_error) {
+    attrs["gen_ai.tool.error"] = true;
+  }
+
+  const childSpan = Sentry.startInactiveSpan({
+    name: `execute_tool ${tool.tool_name}`,
+    op: "gen_ai.execute_tool",
+    startTime: tool.startTime,
+    attributes: attrs,
+  });
+
+  if (tool.tool_error) {
+    childSpan.setStatus({ code: 2, message: "tool_error" });
+  }
+
+  childSpan.end(tool.endTime);
+}
+
 // ── Batch mode ───────────────────────────────────────────────
 
 async function processBatch(filePath: string, config: ResolvedPluginConfig): Promise<void> {
@@ -157,6 +211,10 @@ async function processBatch(filePath: string, config: ResolvedPluginConfig): Pro
   const firstTs = (events[0]._ts as number) || Date.now() / 1000;
   const lastTs = (events[events.length - 1]._ts as number) || Date.now() / 1000;
 
+  // Find UserPromptSubmit event indices for turn-based tracing
+  const userPromptIndices = events
+    .map((e, i) => (e.hook_event_name === "UserPromptSubmit" ? i : -1))
+    .filter((i) => i >= 0);
 
   const rootAttrs: Record<string, string | number | boolean> = {
     "gen_ai.agent.name": "claude-code",
@@ -188,50 +246,81 @@ async function processBatch(filePath: string, config: ResolvedPluginConfig): Pro
     if (tokenData.model) {
       rootSpan.setAttribute("gen_ai.response.model", tokenData.model);
     }
-    if (config.recordInputs && tokenData.prompt) {
-      rootSpan.setAttribute(
-        "gen_ai.request.messages",
-        serializeAttribute(tokenData.prompt, config.maxAttributeLength),
-      );
-    }
-    if (config.recordOutputs && tokenData.lastResponse) {
-      rootSpan.setAttribute(
-        "gen_ai.response.text",
-        serializeAttribute(tokenData.lastResponse, config.maxAttributeLength),
-      );
+    // Only set flat input/output on root span when there are no per-turn spans
+    if (userPromptIndices.length === 0) {
+      if (config.recordInputs && tokenData.prompt) {
+        rootSpan.setAttribute(
+          "gen_ai.request.messages",
+          serializeAttribute([{ role: "user", content: tokenData.prompt }], config.maxAttributeLength),
+        );
+      }
+      if (config.recordOutputs && tokenData.lastResponse) {
+        rootSpan.setAttribute(
+          "gen_ai.response.text",
+          serializeAttribute([tokenData.lastResponse], config.maxAttributeLength),
+        );
+      }
     }
   }
 
-  Sentry.withActiveSpan(rootSpan, () => {
-    for (const tool of toolCalls) {
-      const attrs: Record<string, string | number | boolean> = {
-        "gen_ai.tool.name": tool.tool_name,
-      };
+  if (userPromptIndices.length > 0) {
+    // Turn-based mode: create gen_ai.chat span per conversation turn
+    Sentry.withActiveSpan(rootSpan, () => {
+      for (let t = 0; t < userPromptIndices.length; t++) {
+        const startIdx = userPromptIndices[t];
+        const endIdx =
+          t + 1 < userPromptIndices.length ? userPromptIndices[t + 1] : events.length;
+        const turnEvents = events.slice(startIdx, endIdx);
+        const promptEvent = events[startIdx];
+        const turnStartTs = promptEvent._ts as number;
+        const turnEndTs =
+          t + 1 < userPromptIndices.length
+            ? (events[userPromptIndices[t + 1]]._ts as number)
+            : lastTs;
 
-      if (config.recordInputs && tool.input) {
-        attrs["gen_ai.tool.input"] = serializeAttribute(tool.input, config.maxAttributeLength);
-      }
-      if (config.recordOutputs && tool.output) {
-        attrs["gen_ai.tool.output"] = serializeAttribute(tool.output, config.maxAttributeLength);
-      }
-      if (tool.tool_error) {
-        attrs["gen_ai.tool.error"] = true;
-      }
+        const turnPrompt =
+          (promptEvent.prompt as string) || (promptEvent.message as string) || null;
+        const turnResponse = tokenData?.turnResponses[t] ?? null;
 
-      const childSpan = Sentry.startInactiveSpan({
-        name: `execute_tool ${tool.tool_name}`,
-        op: "gen_ai.execute_tool",
-        startTime: tool.startTime,
-        attributes: attrs,
-      });
+        const turnAttrs: Record<string, string | number | boolean> = {};
+        if (config.recordInputs && turnPrompt) {
+          turnAttrs["gen_ai.request.messages"] = serializeAttribute(
+            [{ role: "user", content: turnPrompt }],
+            config.maxAttributeLength,
+          );
+        }
+        if (config.recordOutputs && turnResponse) {
+          turnAttrs["gen_ai.response.text"] = serializeAttribute(
+            [turnResponse],
+            config.maxAttributeLength,
+          );
+        }
 
-      if (tool.tool_error) {
-        childSpan.setStatus({ code: 2, message: "tool_error" });
+        const turnSpan = Sentry.startInactiveSpan({
+          name: "gen_ai.chat",
+          op: "gen_ai.request",
+          startTime: turnStartTs,
+          attributes: turnAttrs,
+        });
+
+        const turnToolCalls = pairToolEvents(turnEvents);
+        Sentry.withActiveSpan(turnSpan, () => {
+          for (const tool of turnToolCalls) {
+            createToolSpan(tool, config);
+          }
+        });
+
+        turnSpan.end(turnEndTs);
       }
-
-      childSpan.end(tool.endTime);
-    }
-  });
+    });
+  } else {
+    // Fallback: flat tool spans directly under root span
+    Sentry.withActiveSpan(rootSpan, () => {
+      for (const tool of toolCalls) {
+        createToolSpan(tool, config);
+      }
+    });
+  }
 
   rootSpan.setAttribute("gen_ai.tool.call_count", toolCalls.length);
   rootSpan.end(lastTs);
@@ -251,6 +340,7 @@ function startServer(config: ResolvedPluginConfig): void {
     string,
     {
       rootSpan: ReturnType<typeof Sentry.startInactiveSpan>;
+      currentTurnSpan: ReturnType<typeof Sentry.startInactiveSpan> | null;
       pendingTools: Map<string, ReturnType<typeof Sentry.startInactiveSpan>>;
       toolCount: number;
     }
@@ -284,9 +374,38 @@ function startServer(config: ResolvedPluginConfig): void {
         });
         sessions.set(session_id, {
           rootSpan,
+          currentTurnSpan: null,
           pendingTools: new Map(),
           toolCount: 0,
         });
+        break;
+      }
+
+      case "UserPromptSubmit": {
+        const session = sessions.get(session_id);
+        if (!session) break;
+
+        // End previous turn span if any
+        if (session.currentTurnSpan) {
+          session.currentTurnSpan.end();
+        }
+
+        const turnAttrs: Record<string, string | number | boolean> = {};
+        const prompt = (event.prompt as string) || (event.message as string) || null;
+        if (config.recordInputs && prompt) {
+          turnAttrs["gen_ai.request.messages"] = serializeAttribute(
+            [{ role: "user", content: prompt }],
+            config.maxAttributeLength,
+          );
+        }
+
+        session.currentTurnSpan = Sentry.withActiveSpan(session.rootSpan, () =>
+          Sentry.startInactiveSpan({
+            name: "gen_ai.chat",
+            op: "gen_ai.request",
+            attributes: turnAttrs,
+          }),
+        );
         break;
       }
 
@@ -305,7 +424,8 @@ function startServer(config: ResolvedPluginConfig): void {
           );
         }
 
-        const toolSpan = Sentry.withActiveSpan(session.rootSpan, () =>
+        const parentSpan = session.currentTurnSpan ?? session.rootSpan;
+        const toolSpan = Sentry.withActiveSpan(parentSpan, () =>
           Sentry.startInactiveSpan({
             name: `execute_tool ${tool_name}`,
             op: "gen_ai.execute_tool",
@@ -348,6 +468,9 @@ function startServer(config: ResolvedPluginConfig): void {
       case "SessionEnd": {
         const session = sessions.get(session_id);
         if (!session) break;
+        if (session.currentTurnSpan) {
+          session.currentTurnSpan.end();
+        }
         for (const span of session.pendingTools.values()) {
           span.end();
         }
