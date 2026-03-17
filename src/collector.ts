@@ -256,12 +256,13 @@ function startServer(config: ResolvedPluginConfig): void {
   >();
 
   function handleEvent(event: Record<string, unknown>): void {
-    const { session_id, hook_event_name, tool_name } = event as {
+    const { session_id, hook_event_name: rawEvent, tool_name } = event as {
       session_id: string;
       hook_event_name: string;
       tool_name?: string;
       tool_input?: unknown;
     };
+    const hook_event_name = rawEvent.charAt(0).toUpperCase() + rawEvent.slice(1);
 
     switch (hook_event_name) {
       case "SessionStart": {
@@ -436,7 +437,9 @@ async function main(): Promise<void> {
   });
 
   const timestamped = addTimestamp(event);
-  const hookEvent = event.hook_event_name as string;
+  // Normalize: Claude Code sends "sessionEnd" (camelCase) but other events are PascalCase
+  const rawHookEvent = event.hook_event_name as string;
+  const hookEvent = rawHookEvent.charAt(0).toUpperCase() + rawHookEvent.slice(1);
   const sessionId = event.session_id as string;
 
   if (!sessionId) {

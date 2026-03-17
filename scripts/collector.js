@@ -191,7 +191,8 @@ function startServer(config) {
     const PORT = parseInt(process.env.SENTRY_COLLECTOR_PORT || "9876", 10);
     const sessions = new Map();
     function handleEvent(event) {
-        const { session_id, hook_event_name, tool_name } = event;
+        const { session_id, hook_event_name: rawEvent, tool_name } = event;
+        const hook_event_name = rawEvent.charAt(0).toUpperCase() + rawEvent.slice(1);
         switch (hook_event_name) {
             case "SessionStart": {
                 const rootAttrs = {
@@ -339,7 +340,9 @@ async function main() {
         debug: config.debug,
     });
     const timestamped = addTimestamp(event);
-    const hookEvent = event.hook_event_name;
+    // Normalize: Claude Code sends "sessionEnd" (camelCase) but other events are PascalCase
+    const rawHookEvent = event.hook_event_name;
+    const hookEvent = rawHookEvent.charAt(0).toUpperCase() + rawHookEvent.slice(1);
     const sessionId = event.session_id;
     if (!sessionId) {
         process.exit(0);
