@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-04-25
+
+### Fixed
+
+- **Plugin installs now actually run hooks.** `scripts/*.js` / `scripts/*.map` were previously `.gitignored`, so fresh git-clone installs via the marketplace shipped without `hook-client.js` / `index.js` / `server.js` etc. `hook.sh` silently no-op'd and no events reached the collector. The compiled JS is now tracked in git, with a CI drift guard (`scripts/*.js`) that fails the build if generated files go stale relative to `src/`.
+
+### Added
+
+- **Per-turn root transactions for realtime trace visibility.** Each conversation turn now opens its own `gen_ai.invoke_agent` root transaction in realtime mode instead of batching everything under a single session-level root. Improves Sentry trace navigation and makes per-turn span aggregation match the batch-mode contract.
+
 ## [0.1.0] - 2026-04-24
 
 ### Added
