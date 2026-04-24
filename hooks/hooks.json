@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sentry-hook.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
             "async": true,
             "timeout": 10
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sentry-hook.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
             "async": true,
             "timeout": 5
           }
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sentry-hook.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
             "async": true,
             "timeout": 5
           }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sentry-hook.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
             "async": true,
             "timeout": 5
           }
@@ -53,8 +53,32 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sentry-hook.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
             "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh",
+            "async": true,
+            "timeout": 5
           }
         ]
       }
