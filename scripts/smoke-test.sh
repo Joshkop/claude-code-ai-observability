@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SENTRY_COLLECTOR_PORT=${SENTRY_COLLECTOR_PORT:-19877}
-BASE_URL="http://127.0.0.1:${SENTRY_COLLECTOR_PORT}"
+# Always test the source default port. Allow an explicit AIOBS_SMOKE_PORT
+# override for CI environments where 19877 is taken; do NOT inherit
+# SENTRY_COLLECTOR_PORT from the parent shell (would mask src changes).
+SMOKE_PORT="${AIOBS_SMOKE_PORT:-19877}"
+export SENTRY_COLLECTOR_PORT="$SMOKE_PORT"
+BASE_URL="http://127.0.0.1:${SMOKE_PORT}"
 TRANSCRIPT_PATH="/tmp/aiobs-smoke-transcript.jsonl"
 DUMMY_DSN='{"dsn":"https://dummy@o0.ingest.sentry.io/0","tracesSampleRate":0}'
 SERVER_PID=""
@@ -30,7 +34,7 @@ node "$SCRIPT_DIR/index.js" --serve "$DUMMY_DSN" &
 SERVER_PID=$!
 
 # Poll /health up to 5 seconds
-echo "Waiting for collector on port ${SENTRY_COLLECTOR_PORT}..."
+echo "Waiting for collector on port ${SMOKE_PORT}..."
 for i in $(seq 1 25); do
   if curl -sf "${BASE_URL}/health" -o /dev/null 2>/dev/null; then
     echo "Collector is up."

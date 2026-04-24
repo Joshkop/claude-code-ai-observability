@@ -22,8 +22,18 @@ export interface Totals {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens: number;
   totalTokens: number;
 }
+
+export interface ModelPriceEntry {
+  input: number;
+  cacheCreation: number;
+  cacheRead: number;
+  output: number;
+}
+
+export type PriceTable = Record<string, ModelPriceEntry>;
 
 export interface ToolSpan {
   toolName: string;
@@ -46,11 +56,14 @@ export interface PluginConfig {
   recordOutputs?: boolean;
   maxAttributeLength?: number;
   tags?: Record<string, string>;
+  prices?: PriceTable;
 }
 
-export interface ResolvedPluginConfig extends Required<Omit<PluginConfig, 'environment' | 'release'>> {
+export interface ResolvedPluginConfig
+  extends Required<Omit<PluginConfig, "environment" | "release" | "prices">> {
   environment?: string;
   release?: string;
+  prices?: PriceTable;
 }
 
 export interface SessionStartEvent {
@@ -124,9 +137,3 @@ export interface AutoTags {
   "process.pid"?: number;
 }
 
-export interface ModelPrice {
-  inputPerMToken: number;
-  outputPerMToken: number;
-  cacheReadPerMToken: number;
-  cacheWritePerMToken: number;
-}

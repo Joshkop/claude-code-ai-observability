@@ -97,7 +97,7 @@ All env vars take precedence over the config file.
 | `CLAUDE_SENTRY_MAX_ATTRIBUTE_LENGTH` | `maxAttributeLength` |
 | `CLAUDE_SENTRY_TAGS` | Merges into `tags` (format: `key1:val1,key2:val2`) |
 | `CLAUDE_SENTRY_CONFIG` | Path to config file (overrides default search) |
-| `SENTRY_COLLECTOR_PORT` | Port the local collector listens on (default `19876`) |
+| `SENTRY_COLLECTOR_PORT` | Port the local collector listens on (default `19877`) |
 | `CLAUDE_AIOBS_PRICE_OVERRIDES` | JSON price table merged over defaults (see Cost section) |
 
 ## Auto-tag reference
@@ -122,15 +122,27 @@ All detections are non-blocking and cached once per session. Missing tools (git,
 
 ## Cost calculation
 
-Per-turn and session-total USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku). Cached input tokens are priced at the `cacheRead` rate.
+Per-turn and session-total USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku). The three input buckets are priced separately:
+- raw input tokens at the `input` rate,
+- `cache_creation_input_tokens` at the `cacheCreation` rate,
+- `cache_read_input_tokens` at the `cacheRead` rate.
 
-To add or override model prices, set `CLAUDE_AIOBS_PRICE_OVERRIDES` to a JSON object:
+To add or override model prices, set `CLAUDE_AIOBS_PRICE_OVERRIDES` (env) **or** `prices` in your config file:
 
 ```bash
 export CLAUDE_AIOBS_PRICE_OVERRIDES='{"my-custom-model":{"input":3,"cacheCreation":3.75,"cacheRead":0.3,"output":15}}'
 ```
 
-Prices are in USD per million tokens.
+```jsonc
+{
+  "dsn": "...",
+  "prices": {
+    "my-custom-model": {"input":3,"cacheCreation":3.75,"cacheRead":0.3,"output":15}
+  }
+}
+```
+
+Prices are in USD per million tokens. Precedence: built-in defaults < env override < `prices` in config file < direct API overrides.
 
 ## Sentry dashboard setup
 
@@ -141,12 +153,12 @@ The **"Tokens Used"** widget in the AI Agents view reads from `gen_ai.chat` span
 ## Troubleshooting
 
 **No traces appearing in Sentry**
-- Check the collector is running: `curl http://localhost:19876/health` should return `ok`.
+- Check the collector is running: `curl http://localhost:19877/health` should return `ok`.
 - Verify your DSN is set correctly in the config file or `CLAUDE_SENTRY_DSN`.
 - Enable debug logging: set `"debug": true` in config or `CLAUDE_SENTRY_DEBUG=true`.
 
 **WSL2 port conflict**
-- The default port `19876` may collide with another process in WSL2.
+- The default port `19877` may collide with another process in WSL2.
 - Set `SENTRY_COLLECTOR_PORT=<free-port>` in your shell profile and the hooks will use it.
 
 **Hook timeout / Claude hangs briefly**

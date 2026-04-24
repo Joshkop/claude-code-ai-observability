@@ -71,6 +71,59 @@ describe("computeCost", () => {
     // Not zero — just verify sign
     expect(cost.totalCost).toBeGreaterThan(0);
   });
+
+  it("cache_creation tokens billed at cacheCreation rate, not input rate", () => {
+    // Opus: input=$15/M, cacheCreation=$18.75/M, cacheRead=$1.5/M.
+    // 1M tokens, all cache-creation → $18.75 input cost (NOT $15).
+    const allCreate = computeCost(
+      {
+        model: "claude-opus-4-7",
+        inputTokens: 1_000_000,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 1_000_000,
+        outputTokens: 0,
+      },
+      DEFAULT_PRICE_TABLE,
+    );
+    expect(allCreate.inputCost).toBeCloseTo(18.75, 4);
+  });
+
+  it("three-bucket pricing: split cache_creation, cache_read, and raw input", () => {
+    // Opus: input=$15/M, cacheCreation=$18.75/M, cacheRead=$1.5/M, output=$75/M.
+    // 1M raw input + 1M cache-creation + 1M cache-read + 1M output
+    // total inputTokens stored as 3M; cachedInputTokens=1M, cacheCreationTokens=1M
+    // expected: 1M*$15 + 1M*$18.75 + 1M*$1.5 = $35.25 input ; 1M*$75 = $75 output ; $110.25 total
+    const cost = computeCost(
+      {
+        model: "claude-opus-4-7",
+        inputTokens: 3_000_000,
+        cachedInputTokens: 1_000_000,
+        cacheCreationTokens: 1_000_000,
+        outputTokens: 1_000_000,
+      },
+      DEFAULT_PRICE_TABLE,
+    );
+    expect(cost.inputCost).toBeCloseTo(35.25, 4);
+    expect(cost.outputCost).toBeCloseTo(75, 4);
+    expect(cost.totalCost).toBeCloseTo(110.25, 4);
+  });
+
+  it("clamps cacheCreationTokens so non-cached input never goes negative", () => {
+    // Even if caller passes cacheCreation > available non-cached, math stays sane.
+    const cost = computeCost(
+      {
+        model: "claude-opus-4-7",
+        inputTokens: 100_000,
+        cachedInputTokens: 50_000,
+        cacheCreationTokens: 999_999, // way more than the 50k of non-cached available
+        outputTokens: 0,
+      },
+      DEFAULT_PRICE_TABLE,
+    );
+    // Should treat it as: 50k cached at cacheRead + 50k cache-creation at cacheCreation rate.
+    // 50k * $1.5/M = $0.075 ; 50k * $18.75/M = $0.9375 ; total = $1.0125
+    expect(cost.inputCost).toBeCloseTo(1.0125, 4);
+  });
 });
 
 describe("loadPriceTable", () => {
@@ -130,5 +183,32 @@ describe("loadPriceTable", () => {
     });
     // direct overrides win
     expect(table["claude-opus-4-7"].input).toBe(1);
+  });
+
+  it("config.prices is wired through and beats defaults", () => {
+    // Reproduces the previously-broken config-file price override path.
+    const table = loadPriceTable(null, {
+      tags: {},
+      prices: {
+        "claude-opus-4-7": { input: 7, cacheCreation: 7, cacheRead: 7, output: 7 },
+      },
+    });
+    expect(table["claude-opus-4-7"].input).toBe(7);
+    // Other defaults still present.
+    expect(table["claude-sonnet-4-6"]).toBeDefined();
+  });
+
+  it("env CLAUDE_AIOBS_PRICE_OVERRIDES beats config.prices (env wins)", () => {
+    process.env.CLAUDE_AIOBS_PRICE_OVERRIDES = JSON.stringify({
+      "claude-opus-4-7": { input: 99, cacheCreation: 99, cacheRead: 99, output: 99 },
+    });
+    const table = loadPriceTable(null, {
+      tags: {},
+      prices: {
+        "claude-opus-4-7": { input: 7, cacheCreation: 7, cacheRead: 7, output: 7 },
+      },
+    });
+    // Documented precedence: defaults < env < config.prices < direct overrides.
+    expect(table["claude-opus-4-7"].input).toBe(7);
   });
 });

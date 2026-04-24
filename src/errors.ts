@@ -1,5 +1,6 @@
 import type * as Sentry from "@sentry/node";
 import type { PostToolUseEvent } from "./types.js";
+import { scrubString } from "./serialize.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 type SentryLike = typeof Sentry;
@@ -58,19 +59,7 @@ function coerceMessage(value: unknown, max: number): string | null {
     }
   }
   if (!s) return null;
-  return redact(s.length <= max ? s : s.slice(0, max) + "…");
-}
-
-const REDACT_PATTERNS: Array<[RegExp, string]> = [
-  [/sk-[A-Za-z0-9_\-]{16,}/g, "sk-***"],
-  [/Bearer\s+[A-Za-z0-9._\-]+/gi, "Bearer ***"],
-  [/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, "***@***"],
-];
-
-function redact(s: string): string {
-  let out = s;
-  for (const [re, repl] of REDACT_PATTERNS) out = out.replace(re, repl);
-  return out;
+  return scrubString(s.length <= max ? s : s.slice(0, max) + "…");
 }
 
 function trySetStatus(span: Span, status: { code: number; message: string }): void {

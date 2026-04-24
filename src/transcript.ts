@@ -107,15 +107,18 @@ export function extractTotals(turns: TurnTokens[]): Totals {
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
+  let cacheCreationTokens = 0;
   for (const t of turns) {
     inputTokens += t.inputTokens;
     outputTokens += t.outputTokens;
     cachedInputTokens += t.cachedInputTokens;
+    cacheCreationTokens += t.cacheCreationTokens;
   }
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
+    cacheCreationTokens,
     totalTokens: inputTokens + outputTokens,
   };
 }

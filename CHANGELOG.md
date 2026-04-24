@@ -24,3 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Forked from [sergical/claude-code-sentry-monitor](https://github.com/sergical/claude-code-sentry-monitor) — plugin slug renamed to `claude-code-ai-observability`; upstream remote preserved for optional PR-back.
 - Config file path changed to `~/.config/claude-code/sentry-monitor.json` (`.jsonc` also supported with comment stripping).
+- **Default collector port `19877`** (was `19876` in initial scaffold; clashes with upstream plugin's prod port). Override via `SENTRY_COLLECTOR_PORT`.
+- **Cost calculator now bills `cache_creation_input_tokens` at the `cacheCreation` rate** (was previously billed at the plain `input` rate, under-pricing cache writes). Three-bucket pricing: raw input, cache-creation, cache-read each get their own rate.
+- **`prices` field in the config file is now wired through** `ResolvedPluginConfig` and the price-table loader (was silently dropped). Documented precedence: defaults < env override < `prices` in config < direct API override.
+- **Tool output is sanitized**: `gen_ai.tool.output` now passes through `serialize()` (key-based + value-pattern redaction) before reaching Sentry, instead of being attached verbatim. Bash output / file reads no longer leak secrets like API keys, Bearer tokens, JWTs, or credentials in URLs to span attributes.
+- **Unified secret redactor**: the three previously-divergent redact lists in `serialize.ts`, `subagent.ts`, and `errors.ts` are consolidated into a single exported `scrubString` in `serialize.ts`. New patterns added: `Bearer`, `Basic`, `password=`/`token=`/`secret=` assignments, URI userinfo (`proto://user:pass@host`), Stripe `sk_live_`/`rk_live_`, modern GitHub tokens (`ghu_`/`ghs_`).

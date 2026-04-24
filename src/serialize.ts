@@ -2,18 +2,26 @@ const SENSITIVE_KEY_PATTERN =
   /(api[-_]?key|token|secret|password|passwd|authorization|cookie|session|bearer|x[-_]?api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|refresh[-_]?token|aws[-_]?secret|gh[-_]?token|github[-_]?token|slack[-_]?token|signing[-_]?key|salt|hmac|jwt|otp|pin|credential)/i;
 
 const VALUE_SCRUB_PATTERNS: Array<[RegExp, string]> = [
-  [/sk-[A-Za-z0-9_-]{16,}/g, "[REDACTED:openai-key]"],
   [/sk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED:anthropic-key]"],
+  [/sk-[A-Za-z0-9_-]{16,}/g, "[REDACTED:openai-key]"],
+  [/sk_live_[A-Za-z0-9]{16,}/g, "[REDACTED:stripe-live-key]"],
+  [/rk_live_[A-Za-z0-9]{16,}/g, "[REDACTED:stripe-restricted-key]"],
   [/ghp_[A-Za-z0-9]{20,}/g, "[REDACTED:github-token]"],
   [/gho_[A-Za-z0-9]{20,}/g, "[REDACTED:github-oauth]"],
+  [/ghu_[A-Za-z0-9]{20,}/g, "[REDACTED:github-user]"],
+  [/ghs_[A-Za-z0-9]{20,}/g, "[REDACTED:github-server]"],
   [/AKIA[0-9A-Z]{16}/g, "[REDACTED:aws-key-id]"],
   [/AIza[0-9A-Za-z_-]{35}/g, "[REDACTED:google-key]"],
   [/xox[baprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED:slack-token]"],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED:private-key]"],
   [/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED:jwt]"],
+  [/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, "Bearer [REDACTED]"],
+  [/Basic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [REDACTED]"],
+  [/(\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?token)\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)/gi, "$1[REDACTED]"],
+  [/([a-z][a-z0-9+.\-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi, "$1[REDACTED]:[REDACTED]@"],
 ];
 
-function scrubString(s: string): string {
+export function scrubString(s: string): string {
   let out = s;
   for (const [pattern, replacement] of VALUE_SCRUB_PATTERNS) {
     out = out.replace(pattern, replacement);

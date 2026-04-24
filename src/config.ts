@@ -65,6 +65,7 @@ export function resolveDefaults(raw: PluginConfig): ResolvedPluginConfig {
     recordOutputs: raw.recordOutputs ?? DEFAULTS.recordOutputs,
     maxAttributeLength: raw.maxAttributeLength ?? DEFAULTS.maxAttributeLength,
     tags: { ...DEFAULTS.tags, ...(raw.tags ?? {}) },
+    prices: raw.prices,
   };
 }
 
@@ -128,6 +129,7 @@ export async function loadConfig(): Promise<ResolvedPluginConfig | null> {
     recordOutputs: raw?.recordOutputs,
     maxAttributeLength: raw?.maxAttributeLength,
     tags: raw?.tags,
+    prices: raw?.prices,
   };
 
   const withEnv = applyEnvOverrides(base);

@@ -22,6 +22,7 @@ import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
 import { applyToolError, captureBreadcrumb } from "./errors.js";
+import { serialize } from "./serialize.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 
@@ -37,7 +38,7 @@ interface SessionRecord {
   autoTags: AutoTags;
 }
 
-const DEFAULT_PORT = 19876;
+const DEFAULT_PORT = 19877;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -109,6 +110,7 @@ export function startServer(
         model: tokens.model ?? record.responseModel ?? record.model ?? null,
         inputTokens: tokens.inputTokens,
         cachedInputTokens: tokens.cachedInputTokens,
+        cacheCreationTokens: tokens.cacheCreationTokens,
         outputTokens: tokens.outputTokens,
       },
       priceTable,
@@ -185,17 +187,8 @@ export function startServer(
     if (!span) return;
     if (config.recordOutputs && event.tool_response !== undefined) {
       try {
-        const text = typeof event.tool_response === "string"
-          ? event.tool_response
-          : JSON.stringify(event.tool_response);
-        if (text) {
-          span.setAttribute(
-            "gen_ai.tool.output",
-            text.length > config.maxAttributeLength
-              ? `${text.slice(0, config.maxAttributeLength)}...[truncated]`
-              : text,
-          );
-        }
+        const sanitized = serialize(event.tool_response, config.maxAttributeLength);
+        if (sanitized) span.setAttribute("gen_ai.tool.output", sanitized);
       } catch {
         // ignore
       }
@@ -239,6 +232,7 @@ export function startServer(
           model: lastModel ?? record.responseModel ?? record.model ?? null,
           inputTokens: totals.inputTokens,
           cachedInputTokens: totals.cachedInputTokens,
+          cacheCreationTokens: totals.cacheCreationTokens,
           outputTokens: totals.outputTokens,
         },
         priceTable,

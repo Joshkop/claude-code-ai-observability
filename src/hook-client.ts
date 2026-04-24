@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { HookEvent } from "./types.js";
 
-const DEFAULT_PORT = 19876;
+const DEFAULT_PORT = 19877;
 
 function getPort(): number {
   return Number(process.env.SENTRY_COLLECTOR_PORT) || DEFAULT_PORT;

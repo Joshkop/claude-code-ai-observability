@@ -1,5 +1,6 @@
 import type * as Sentry from "@sentry/node";
 import type { HookEvent, PreToolUseEvent, PostToolUseEvent } from "./types.js";
+import { scrubString } from "./serialize.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 type SentryLike = typeof Sentry;
@@ -45,8 +46,8 @@ export function createSubagentSpan(
     "gen_ai.operation.name": "invoke_agent",
   };
   if (subagentType) attributes["gen_ai.agent.name"] = subagentType;
-  if (description) attributes["gen_ai.agent.description"] = truncate(description, maxAttrLen);
-  if (prompt) attributes["gen_ai.request.messages"] = redact(truncate(prompt, maxAttrLen));
+  if (description) attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
+  if (prompt) attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
 
   const startSpan = (sentry as unknown as {
     startInactiveSpan?: (opts: unknown) => Span;
@@ -129,18 +130,6 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max) + "…";
 }
 
-const REDACT_PATTERNS: Array<[RegExp, string]> = [
-  [/sk-[A-Za-z0-9_\-]{16,}/g, "sk-***"],
-  [/Bearer\s+[A-Za-z0-9._\-]+/gi, "Bearer ***"],
-  [/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, "***@***"],
-];
-
-function redact(s: string): string {
-  let out = s;
-  for (const [re, repl] of REDACT_PATTERNS) out = out.replace(re, repl);
-  return out;
-}
-
 function coerceErrorMessage(value: unknown, max: number): string | null {
   if (value == null) return null;
   let s: string;
@@ -153,7 +142,7 @@ function coerceErrorMessage(value: unknown, max: number): string | null {
     }
   }
   if (!s) return null;
-  return redact(truncate(s, max));
+  return scrubString(truncate(s, max));
 }
 
 function findFirstKey(m: Map<string, unknown>): string | undefined {

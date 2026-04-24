@@ -1,13 +1,6 @@
-import type { ResolvedPluginConfig } from "./types.js";
+import type { ModelPriceEntry, PriceTable, ResolvedPluginConfig } from "./types.js";
 
-export interface ModelPriceEntry {
-  input: number;
-  cacheCreation: number;
-  cacheRead: number;
-  output: number;
-}
-
-export type PriceTable = Record<string, ModelPriceEntry>;
+export type { ModelPriceEntry, PriceTable };
 
 export interface TurnCost {
   inputCost: number;
@@ -19,6 +12,7 @@ export interface ComputeCostInput {
   model: string | null | undefined;
   inputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens?: number;
   outputTokens: number;
 }
 
@@ -32,7 +26,7 @@ export const DEFAULT_PRICE_TABLE: PriceTable = {
 
 export function loadPriceTable(
   overrides?: PriceTable | null,
-  config?: Pick<ResolvedPluginConfig, "tags"> & { prices?: PriceTable },
+  config?: Pick<ResolvedPluginConfig, "tags" | "prices">,
 ): PriceTable {
   const merged: PriceTable = { ...DEFAULT_PRICE_TABLE };
 
@@ -70,12 +64,17 @@ export function computeCost(
 
   const inputTokens = toNonNegInt(input.inputTokens);
   const cachedInputTokens = Math.min(toNonNegInt(input.cachedInputTokens), inputTokens);
+  const cacheCreationTokens = Math.min(
+    toNonNegInt(input.cacheCreationTokens),
+    Math.max(0, inputTokens - cachedInputTokens),
+  );
   const outputTokens = toNonNegInt(input.outputTokens);
-  const nonCachedInput = inputTokens - cachedInputTokens;
+  const nonCachedInput = Math.max(0, inputTokens - cachedInputTokens - cacheCreationTokens);
 
   const inputMicros =
     nonCachedInput * priceToMicrosPerToken(price.input) +
-    cachedInputTokens * priceToMicrosPerToken(price.cacheRead);
+    cachedInputTokens * priceToMicrosPerToken(price.cacheRead) +
+    cacheCreationTokens * priceToMicrosPerToken(price.cacheCreation);
   const outputMicros = outputTokens * priceToMicrosPerToken(price.output);
 
   const inputCost = inputMicros / MICRO;
