@@ -9,7 +9,7 @@ function applyTags(span, tags, userTags) {
             span.setAttribute(k, v);
     }
 }
-export function createRootSpan(sentry, sessionId, tags, config, model, startTime) {
+export function openTurnTransaction(sentry, sessionId, turnIndex, prompt, tags, config, model, startTime) {
     const span = sentry.startInactiveSpan({
         op: "gen_ai.invoke_agent",
         name: "invoke_agent claude-code",
@@ -20,31 +20,16 @@ export function createRootSpan(sentry, sessionId, tags, config, model, startTime
             "gen_ai.system": "anthropic",
             "gen_ai.operation.name": "invoke_agent",
             "claude_code.session_id": sessionId,
+            "claude_code.turn_index": turnIndex,
             ...(model ? { "gen_ai.request.model": model } : {}),
         },
     });
     applyTags(span, tags, config.tags);
+    if (config.recordInputs && prompt) {
+        const messages = serialize([{ role: "user", content: prompt }], config.maxAttributeLength);
+        span.setAttribute("gen_ai.request.messages", messages);
+    }
     return span;
-}
-export function openTurnSpan(sentry, rootSpan, prompt, tags, config, model, startTime) {
-    return sentry.withActiveSpan(rootSpan, () => {
-        const span = sentry.startInactiveSpan({
-            op: "gen_ai.chat",
-            name: "gen_ai.chat",
-            startTime,
-            attributes: {
-                "gen_ai.operation.name": "chat",
-                "gen_ai.system": "anthropic",
-                ...(model ? { "gen_ai.request.model": model } : {}),
-            },
-        });
-        applyTags(span, tags, config.tags);
-        if (config.recordInputs && prompt) {
-            const messages = serialize([{ role: "user", content: prompt }], config.maxAttributeLength);
-            span.setAttribute("gen_ai.request.messages", messages);
-        }
-        return span;
-    });
 }
 export function closeTurnSpan(turnSpan, input, config, endTime) {
     const { tokens, responseModel, cost, response } = input;
@@ -70,11 +55,12 @@ export function closeTurnSpan(turnSpan, input, config, endTime) {
     turnSpan.end(endTime);
 }
 export function createToolSpan(sentry, parentSpan, toolName, input, config, startTime) {
-    return sentry.withActiveSpan(parentSpan, () => {
+    const start = () => {
         const span = sentry.startInactiveSpan({
             op: "gen_ai.execute_tool",
             name: `execute_tool ${toolName}`,
             startTime,
+            ...(parentSpan ? {} : { forceTransaction: true }),
             attributes: {
                 "gen_ai.tool.name": toolName,
                 "gen_ai.operation.name": "execute_tool",
@@ -85,5 +71,9 @@ export function createToolSpan(sentry, parentSpan, toolName, input, config, star
             span.setAttribute("gen_ai.tool.input", serialize(input, config.maxAttributeLength));
         }
         return span;
-    });
+    };
+    if (parentSpan) {
+        return sentry.withActiveSpan(parentSpan, start);
+    }
+    return start();
 }

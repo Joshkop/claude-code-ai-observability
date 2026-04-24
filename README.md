@@ -3,14 +3,14 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Plugin for Claude Code](https://img.shields.io/badge/claude--code-plugin-blueviolet)](https://github.com/anthropics/claude-code)
 
-Comprehensive AI Agent Observability plugin for Claude Code. Sends realtime OpenTelemetry-style traces to Sentry for every session: each session becomes a root `gen_ai.invoke_agent` transaction, each user turn a `gen_ai.chat` span with per-turn token counts and USD cost, each tool call a `gen_ai.execute_tool` span, and Task-tool invocations nested `gen_ai.invoke_agent` subagent spans. Auto-tags every trace with session, git, host, and OS context so you get actionable observability out of the box with no configuration beyond a DSN.
+Comprehensive AI Agent Observability plugin for Claude Code. Sends realtime OpenTelemetry-style traces to Sentry: each user turn (UserPromptSubmit → next prompt or SessionEnd) becomes its own `gen_ai.invoke_agent` root transaction with per-turn token counts and USD cost, each tool call a `gen_ai.execute_tool` child span, and Task-tool invocations nested `gen_ai.invoke_agent` subagent spans. Turns from the same session are correlated by the `claude_code.session_id` tag — filter or group by it in Sentry to aggregate session totals. Auto-tags every trace with session, git, host, and OS context so you get actionable observability out of the box with no configuration beyond a DSN.
 
 ## What it adds over upstream
 
-- Correct `gen_ai.chat` operation on turn spans (not `gen_ai.request`) so Sentry's "Tokens Used" widget aggregates correctly.
-- Per-turn token attributes (`gen_ai.usage.input_tokens`, `output_tokens`, `total_tokens`, `input_tokens.cached`) extracted from the live transcript.
+- Per-turn root transactions: every UserPromptSubmit opens a fresh `gen_ai.invoke_agent` transaction, so traces appear in Sentry within seconds of a turn finishing instead of waiting for the whole session to end.
+- Per-turn token attributes (`gen_ai.usage.input_tokens`, `output_tokens`, `total_tokens`, `input_tokens.cached`) extracted from the live transcript and attached directly to the turn transaction.
 - Subagent spans: Task-tool invocations produce nested `gen_ai.invoke_agent` spans with `gen_ai.agent.name` set from `subagent_type`.
-- USD cost calculation per turn and session-total (`gen_ai.usage.cost.*`) with env-overridable price table.
+- USD cost calculation per turn (`gen_ai.usage.cost.*`) with env-overridable price table.
 - Rich auto-tagging on every span: session ID/name, git branch/SHA/remote URL, hostname, OS, cwd, PID.
 - `PreCompact` and `Stop` hooks handled gracefully (no-op, no crash).
 - WSL2-safe health probes: the hook client uses `AbortSignal.timeout(500)` to avoid hanging on silently-dropped ports.
@@ -102,7 +102,7 @@ All env vars take precedence over the config file.
 
 ## Auto-tag reference
 
-These attributes are set on the root span and inherited by all child spans.
+These attributes are applied to every per-turn root transaction and inherited by its child tool spans. Filter or group by `claude_code.session_id` in Sentry to aggregate across all turns of a session.
 
 | Attribute | Source |
 |---|---|
@@ -122,7 +122,7 @@ All detections are non-blocking and cached once per session. Missing tools (git,
 
 ## Cost calculation
 
-Per-turn and session-total USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku). The three input buckets are priced separately:
+Per-turn USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku) and attached to each turn transaction as `gen_ai.usage.cost.*`. Session totals are aggregated in Sentry by grouping on `claude_code.session_id`. The three input buckets are priced separately:
 - raw input tokens at the `input` rate,
 - `cache_creation_input_tokens` at the `cacheCreation` rate,
 - `cache_read_input_tokens` at the `cacheRead` rate.
@@ -148,7 +148,7 @@ Prices are in USD per million tokens. Precedence: built-in defaults < env overri
 
 See the official [Sentry AI Agents monitoring docs](https://docs.sentry.io/product/insights/agents/) for dashboard setup.
 
-The **"Tokens Used"** widget in the AI Agents view reads from `gen_ai.chat` spans. This plugin emits all token attributes (`gen_ai.usage.input_tokens`, `output_tokens`, `total_tokens`, `input_tokens.cached`) on the turn-level `gen_ai.chat` spans, which is what the dashboard aggregates over.
+The **"Tokens Used"** widget in the AI Agents view aggregates `gen_ai.usage.*` attributes across `gen_ai.invoke_agent` spans. This plugin emits all token attributes (`gen_ai.usage.input_tokens`, `output_tokens`, `total_tokens`, `input_tokens.cached`) on every per-turn `gen_ai.invoke_agent` transaction, and tags each one with `claude_code.session_id` so you can filter or group by session.
 
 ## Troubleshooting
 
