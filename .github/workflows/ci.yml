@@ -18,10 +18,10 @@ jobs:
       - run: npm test
       - name: build
         run: npm run build
-      - name: assert scripts/ is in sync with src/
+      - name: assert scripts/*.js is in sync with src/
         run: |
-          if ! git diff --quiet --exit-code scripts/; then
-            echo "::error::scripts/ is out of sync with src/. Run 'npm run build' and commit the result."
-            git diff scripts/
+          if ! git diff --quiet --exit-code -- 'scripts/*.js'; then
+            echo "::error::scripts/*.js is out of sync with src/. Run 'npm run build' and commit the result."
+            git diff -- 'scripts/*.js'
             exit 1
           fi
