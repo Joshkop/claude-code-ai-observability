@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - name: build
+        run: npm run build
+      - name: assert scripts/ is in sync with src/
+        run: |
+          if ! git diff --quiet --exit-code scripts/; then
+            echo "::error::scripts/ is out of sync with src/. Run 'npm run build' and commit the result."
+            git diff scripts/
+            exit 1
+          fi
