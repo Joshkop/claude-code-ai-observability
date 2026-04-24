@@ -2,3 +2,9 @@ node_modules/
 scripts/*.js
 scripts/*.map
 scripts/package-lock.json
+
+# OMC runtime state — keep .omc/handoffs/ tracked, ignore everything else
+.omc/state/
+.omc/logs/
+.omc/research/
+.omc/plans/
