@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
-import { closeTurnSpan, createRootSpan, createToolSpan, openTurnSpan, } from "./spans.js";
-import { extractPerTurnTokens, extractTotals } from "./transcript.js";
+import { closeTurnSpan, createToolSpan, openTurnTransaction, } from "./spans.js";
+import { extractPerTurnTokens } from "./transcript.js";
 import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
@@ -34,9 +34,7 @@ export function startServer(sentry, config, baseAutoTags) {
             ...detected,
             "claude_code.session_id": event.session_id,
         };
-        const rootSpan = createRootSpan(sentry, event.session_id, autoTags, config, event.model);
         sessions.set(event.session_id, {
-            rootSpan,
             currentTurnSpan: null,
             pendingTools: new Map(),
             toolCount: 0,
@@ -90,15 +88,15 @@ export function startServer(sentry, config, baseAutoTags) {
         closeCurrentTurn(record);
         record.turnIndex += 1;
         const prompt = event.prompt ?? event.message ?? null;
-        record.currentTurnSpan = openTurnSpan(sentry, record.rootSpan, prompt, record.autoTags, config, record.model);
+        record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
     };
     const handlePreTool = (event) => {
         const record = sessions.get(event.session_id);
         if (!record)
             return;
-        const parent = record.currentTurnSpan ?? record.rootSpan;
+        const parent = record.currentTurnSpan;
         if (attachSubagentToEvent(sentry, subagentSession, event, {
-            parent,
+            parent: parent ?? undefined,
             maxAttrLen: config.maxAttributeLength,
         })) {
             record.toolCount += 1;
@@ -158,6 +156,9 @@ export function startServer(sentry, config, baseAutoTags) {
         const record = sessions.get(event.session_id);
         if (!record)
             return;
+        if (event.transcript_path && !record.transcriptPath) {
+            record.transcriptPath = event.transcript_path;
+        }
         closeCurrentTurn(record);
         for (const [, span] of record.pendingTools) {
             try {
@@ -166,31 +167,6 @@ export function startServer(sentry, config, baseAutoTags) {
             catch { /* ignore */ }
         }
         record.pendingTools.clear();
-        record.rootSpan.setAttribute("gen_ai.tool.call_count", record.toolCount);
-        const transcriptPath = event.transcript_path ?? record.transcriptPath;
-        if (transcriptPath) {
-            const turns = extractPerTurnTokens(transcriptPath);
-            const totals = extractTotals(turns);
-            record.rootSpan.setAttribute("gen_ai.usage.input_tokens", totals.inputTokens);
-            record.rootSpan.setAttribute("gen_ai.usage.output_tokens", totals.outputTokens);
-            record.rootSpan.setAttribute("gen_ai.usage.total_tokens", totals.totalTokens);
-            record.rootSpan.setAttribute("gen_ai.usage.input_tokens.cached", totals.cachedInputTokens);
-            record.rootSpan.setAttribute("claude_code.turn_count", turns.length);
-            const lastModel = [...turns].reverse().find((t) => t.model)?.model;
-            if (lastModel)
-                record.rootSpan.setAttribute("gen_ai.response.model", lastModel);
-            const totalsCost = computeCost({
-                model: lastModel ?? record.responseModel ?? record.model ?? null,
-                inputTokens: totals.inputTokens,
-                cachedInputTokens: totals.cachedInputTokens,
-                cacheCreationTokens: totals.cacheCreationTokens,
-                outputTokens: totals.outputTokens,
-            }, priceTable);
-            record.rootSpan.setAttribute("gen_ai.usage.cost.input_tokens", totalsCost.inputCost);
-            record.rootSpan.setAttribute("gen_ai.usage.cost.output_tokens", totalsCost.outputCost);
-            record.rootSpan.setAttribute("gen_ai.usage.cost.total_tokens", totalsCost.totalCost);
-        }
-        record.rootSpan.end();
         sessions.delete(event.session_id);
         try {
             await sentry.flush(5000);
@@ -264,7 +240,6 @@ export function startServer(sentry, config, baseAutoTags) {
                     }
                     catch { /* ignore */ }
                 }
-                record.rootSpan.end();
             }
             catch { /* ignore */ }
         }
