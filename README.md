@@ -152,18 +152,90 @@ The **"Tokens Used"** widget in the AI Agents view aggregates `gen_ai.usage.*` a
 
 ## Troubleshooting
 
-**No traces appearing in Sentry**
-- Check the collector is running: `curl http://localhost:19877/health` should return `ok`.
-- Verify your DSN is set correctly in the config file or `CLAUDE_SENTRY_DSN`.
-- Enable debug logging: set `"debug": true` in config or `CLAUDE_SENTRY_DEBUG=true`.
+Run `bash scripts/doctor.sh` to diagnose common issues. It probes the collector, checks your DSN config, and reports recent errors.
 
-**WSL2 port conflict**
-- The default port `19877` may collide with another process in WSL2.
-- Set `SENTRY_COLLECTOR_PORT=<free-port>` in your shell profile and the hooks will use it.
+**No data in new sessions / stale collector squatting on port**
 
-**Hook timeout / Claude hangs briefly**
-- The hook client uses `AbortSignal.timeout(500)` on all health probes, so a silently-dropped port will abort within 500 ms instead of hanging through the OS TCP timeout.
-- If hooks are consistently slow, ensure the collector process started (`SessionStart` hook must fire first).
+Symptom: Traces don't appear, or you see "collector not running" in the doctor output.
+
+Diagnosis: Run `bash scripts/doctor.sh` and check "Collector Status" and "Recent Collector Errors". If you see a stale PID or address-already-in-use error, the old collector process is still listening.
+
+Fix: Kill the old process by PID (shown in doctor output or `~/.cache/claude-code-ai-observability/collector.pid`), then start a new Claude session. The hook will respawn the collector automatically.
+
+```bash
+bash scripts/doctor.sh
+kill $(cat ~/.cache/claude-code-ai-observability/collector.pid 2>/dev/null) 2>/dev/null || true
+```
+
+Note: v0.1.2+ automatically evicts stale collectors via version-mismatch detection; older versions did not.
+
+**Hooks silently fail / no traces appearing**
+
+Symptom: Claude sessions start but no trace events reach Sentry.
+
+Diagnosis: Check hook errors and collector logs.
+
+```bash
+tail -20 ~/.cache/claude-code-ai-observability/hook.err.log
+tail -20 ~/.cache/claude-code-ai-observability/collector.err.log
+```
+
+Common causes: DSN not set, collector crashed, port collision, or network issue reaching Sentry. Run `bash scripts/doctor.sh` for the full diagnostic.
+
+**Port collision (EADDRINUSE)**
+
+Symptom: Collector fails to start, logs show "address already in use" at port 19877.
+
+Diagnosis: Another process is using the default port. Run `bash scripts/doctor.sh` and check "Listening Process".
+
+Fix: Set a different port in your shell profile or `~/.claude/settings.json`:
+
+```bash
+export SENTRY_COLLECTOR_PORT=19878
+```
+
+Or via settings.json:
+
+```json
+{
+  "env": {
+    "SENTRY_COLLECTOR_PORT": "19878"
+  }
+}
+```
+
+**DSN not configured**
+
+Symptom: Doctor output shows "no DSN configured".
+
+Diagnosis: The plugin cannot find your Sentry credentials.
+
+Fix: Create a config file at `~/.config/claude-code/sentry-monitor.json`:
+
+```json
+{
+  "dsn": "https://<key>@o<org>.ingest.sentry.io/<project>",
+  "tracesSampleRate": 1
+}
+```
+
+Or set the env var: `export CLAUDE_SENTRY_DSN=https://...`
+
+**Plugin upgraded but old behavior persists**
+
+Symptom: You upgraded the plugin but traces still look different, or old log messages appear.
+
+Diagnosis: `CLAUDE_PLUGIN_ROOT` is captured at session start and doesn't auto-reload.
+
+Fix: Close your terminal and open a new Claude session. The hook will load the new plugin code.
+
+```bash
+# Old session (restart it)
+exit
+
+# New terminal
+claude
+```
 
 ## Attribution
 

@@ -9,6 +9,16 @@ LOG_DIR="${HOME}/.cache/claude-code-ai-observability"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 ERR_LOG="${LOG_DIR}/hook.err.log"
 
+# Rotate hook.err.log once it exceeds 1 MiB so a misconfigured plugin can't
+# quietly fill ~/.cache. Keep a single .1 rollover.
+MAX_SIZE=1048576
+if [ -f "$ERR_LOG" ]; then
+  SIZE=$(wc -c <"$ERR_LOG" 2>/dev/null || echo 0)
+  if [ "${SIZE:-0}" -gt "$MAX_SIZE" ]; then
+    mv "$ERR_LOG" "${ERR_LOG}.1" 2>/dev/null || true
+  fi
+fi
+
 # Auto-install dependencies on first run.
 if [ ! -d "${SCRIPT_DIR}/node_modules/@sentry/node" ]; then
   (cd "$SCRIPT_DIR" && npm install --no-fund --no-audit --silent 2>>"$ERR_LOG") || true

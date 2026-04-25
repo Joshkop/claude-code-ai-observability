@@ -33,4 +33,8 @@ export interface CollectorHealth {
   version?: string;
   startedAt?: number;
   sessions?: number;
+  /** Unix uid of the collector process; used to reject cross-user collectors on shared hosts. */
+  uid?: number;
+  /** True when /health returned 200 with a body that doesn't look like a collector response. */
+  occupied?: boolean;
 }

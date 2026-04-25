@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3] - 2026-04-25
+
+### Fixed
+
+- **Bounded eviction retry (no more livelock).** `ensureServerRunning` is now an iterative loop capped at 3 attempts instead of recursing on stale-lock contention. Under N concurrent session starts with a stale lock-holder, peers fall through to passive wait rather than ping-ponging `releaseLock` / `tryAcquireLock`.
+- **PID-reuse-safe kill.** Before `SIGTERM` and again before the `SIGKILL` escalation, `killStaleCollector` re-confirms the target PID still owns the collector port via `findListenerPid`. If ownership has shifted (kernel recycled the PID to an unrelated process), the kill is aborted with a stderr notice.
+- **Squatting non-collectors no longer get re-spawned-over.** `probeHealth` now distinguishes "legacy collector" (plain `ok`) from "port held by a stranger" (200 OK with a non-recognized body). The hook client warns once and bails instead of looping on `EADDRINUSE`.
+- **Stricter health shape.** `probeHealth` requires `ok: true` in a parsed JSON health response; random `{evil: true}` bodies are treated as occupied.
+- **Collector timers scoped to `listening`.** `setInterval` installs for flush + stale-session reaper now fire from the `listening` handler, and the `EADDRINUSE` branch cleans up the PID file defensively — no more phantom timers or stray PID file if `server.listen` fails.
+- **Full PID-file shape check.** `readPidFile` validates `pid`, `port`, `version`, and `startedAt` types before returning — partial / malformed lock files no longer crash the eviction path.
+- **Subagent-only sessions survive the reaper.** `handlePreTool` / `handlePostTool` bump `lastEventAt` explicitly so a session that spends its 30+ min in subagent-tool work isn't harvested mid-flight.
+
+### Added
+
+- **Cross-user cross-talk guard.** `/health` now includes `uid`; the hook client rejects a collector whose `uid` doesn't match the invoking user, preventing two users on a shared host from cross-wiring each other's Sentry DSNs.
+- **`scripts/doctor.sh`.** A diagnostic helper that prints plugin version, installed-plugin info, `/health` JSON, PID file contents, listening process, DSN config path (without leaking the DSN), recent hook & collector errors, and relevant env vars — ending with a one-line `OK` / `NOT OK` summary.
+- **README Troubleshooting section.** Five common failure modes with doctor-driven diagnosis and exact fix commands (stale collector, silent hooks, port collision, missing DSN, stale session after upgrade).
+- **`hook.err.log` rotation.** Capped at 1 MiB with a single `.1` rollover so a misconfigured plugin can't fill `~/.cache`.
+- **Test coverage for v0.1.2 paths.** New suites: `tests/server-endpoints.test.ts` (JSON `/health` + `/version` + PID file lifecycle), `tests/server-stale-session.test.ts` (exported `isStaleSession` predicate), `tests/hook-client-units.test.ts` (`probeHealth` legacy fallback, JSON strictness, occupied-port detection, `readPidFile` shape validation). Total suite now 121 tests.
+
 ## [0.1.2] - 2026-04-25
 
 ### Fixed

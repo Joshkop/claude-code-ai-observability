@@ -11,6 +11,13 @@ import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 const FLUSH_INTERVAL_MS = 30_000;
 const STALE_SESSION_IDLE_MS = 30 * 60_000;
+/**
+ * Pure predicate used by the reaper timer.
+ * Exported so it can be unit-tested without running a real timer.
+ */
+export function isStaleSession(record, now, idleMs = STALE_SESSION_IDLE_MS) {
+    return now - record.lastEventAt > idleMs;
+}
 function writePidFile(port, startedAt) {
     try {
         mkdirSync(CACHE_DIR, { recursive: true });
@@ -134,6 +141,10 @@ export function startServer(sentry, config, baseAutoTags) {
         const record = sessions.get(event.session_id);
         if (!record)
             return;
+        // Subagent tools can run for >30 min; keep the parent session fresh so the reaper
+        // doesn't harvest it mid-flight. touchSession already bumped at the dispatcher,
+        // but this is belt-and-suspenders in case the event shape ever loses session_id.
+        record.lastEventAt = Date.now();
         const parent = record.currentTurnSpan;
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             parent: parent ?? undefined,
@@ -151,6 +162,7 @@ export function startServer(sentry, config, baseAutoTags) {
         const record = sessions.get(event.session_id);
         if (!record)
             return;
+        record.lastEventAt = Date.now();
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             maxAttrLen: config.maxAttributeLength,
         })) {
@@ -254,6 +266,7 @@ export function startServer(sentry, config, baseAutoTags) {
                 version: PLUGIN_VERSION,
                 startedAt,
                 sessions: sessions.size,
+                uid: process.getuid?.(),
             });
             send(res, 200, body, "application/json");
             return;
@@ -291,39 +304,49 @@ export function startServer(sentry, config, baseAutoTags) {
         }
         send(res, 404, "not_found");
     });
+    // Timers + PID file are installed only after we've successfully bound. Both
+    // need cleanup on shutdown; tying them to the `listening` event keeps the
+    // lifecycle symmetric and avoids a phantom PID file if listen fails.
+    let flushTimer = null;
+    let reapTimer = null;
     server.on("listening", () => {
         writePidFile(port, startedAt);
+        flushTimer = setInterval(() => {
+            try {
+                void sentry.flush(2000);
+            }
+            catch { /* ignore */ }
+        }, FLUSH_INTERVAL_MS);
+        flushTimer.unref?.();
+        reapTimer = setInterval(() => {
+            const now = Date.now();
+            for (const [sid, record] of sessions) {
+                if (isStaleSession(record, now)) {
+                    reapStaleSession(sid, record);
+                }
+            }
+            try {
+                void sentry.flush(2000);
+            }
+            catch { /* ignore */ }
+        }, FLUSH_INTERVAL_MS);
+        reapTimer.unref?.();
     });
     server.on("error", (err) => {
         process.stderr.write(`collector listen error: ${err.message}\n`);
         if (err.code === "EADDRINUSE") {
+            // We never started listening, so no PID file was written — but call
+            // removePidFile defensively in case a sibling's cleanup missed.
+            removePidFile();
             process.exit(2);
         }
     });
     server.listen(port, "127.0.0.1");
-    const flushTimer = setInterval(() => {
-        try {
-            void sentry.flush(2000);
-        }
-        catch { /* ignore */ }
-    }, FLUSH_INTERVAL_MS);
-    flushTimer.unref?.();
-    const reapTimer = setInterval(() => {
-        const now = Date.now();
-        for (const [sid, record] of sessions) {
-            if (now - record.lastEventAt > STALE_SESSION_IDLE_MS) {
-                reapStaleSession(sid, record);
-            }
-        }
-        try {
-            void sentry.flush(2000);
-        }
-        catch { /* ignore */ }
-    }, FLUSH_INTERVAL_MS);
-    reapTimer.unref?.();
     const shutdown = async () => {
-        clearInterval(flushTimer);
-        clearInterval(reapTimer);
+        if (flushTimer)
+            clearInterval(flushTimer);
+        if (reapTimer)
+            clearInterval(reapTimer);
         for (const [, record] of sessions) {
             try {
                 closeCurrentTurn(record);

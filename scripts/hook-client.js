@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, openSync, closeSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ function getPort() {
 function baseUrl(port) {
     return `http://127.0.0.1:${port}`;
 }
-async function probeHealth(port, timeoutMs = 500) {
+export async function probeHealth(port, timeoutMs = 500) {
     try {
         const res = await fetch(`${baseUrl(port)}/health`, {
             signal: AbortSignal.timeout(timeoutMs),
@@ -25,13 +25,14 @@ async function probeHealth(port, timeoutMs = 500) {
             return { ok: true };
         try {
             const parsed = JSON.parse(trimmed);
-            if (parsed && typeof parsed === "object")
+            if (parsed && typeof parsed === "object" && parsed.ok === true)
                 return parsed;
         }
         catch {
-            // ignore parse failures
+            // Not JSON — fall through; port is held by a stranger (e.g. a dev web server).
         }
-        return null;
+        // 200 OK but not a recognized collector body. Port is occupied by something else.
+        return { ok: false, occupied: true };
     }
     catch {
         return null;
@@ -57,12 +58,17 @@ function logDir() {
     catch { /* ignore */ }
     return CACHE_DIR;
 }
-function readPidFile() {
+export function readPidFile() {
     try {
         const text = readFileSync(PID_FILE, "utf8");
         const data = JSON.parse(text);
-        if (data && typeof data.pid === "number")
+        if (data &&
+            typeof data.pid === "number" &&
+            typeof data.port === "number" &&
+            typeof data.version === "string" &&
+            typeof data.startedAt === "number") {
             return data;
+        }
     }
     catch {
         // ignore
@@ -116,6 +122,14 @@ async function killStaleCollector(reason, info, port) {
     process.stderr.write(`claude-code-ai-observability: replacing stale collector (${reason}); pid=${pid ?? "unknown"}\n`);
     if (!pid)
         return;
+    // Guard against PID reuse: if we can verify the listener, confirm it's still our target
+    // before signalling. When findListenerPid returns null (missing lsof/ss/fuser), fall
+    // through — we can't verify, so accept the informational risk.
+    const currentOwner = findListenerPid(port);
+    if (currentOwner !== null && currentOwner !== pid) {
+        process.stderr.write(`claude-code-ai-observability: abort SIGTERM — port ${port} now owned by pid ${currentOwner}, not ${pid}\n`);
+        return;
+    }
     try {
         process.kill(pid, "SIGTERM");
     }
@@ -134,21 +148,63 @@ async function killStaleCollector(reason, info, port) {
             return;
         }
     }
-    // Last resort.
+    // Before SIGKILL, re-verify the PID still holds the port. Another process could have
+    // claimed it during the 2 s wait (kernel reuses PIDs fast on busy systems).
+    const stillOwns = findListenerPid(port);
+    if (stillOwns !== null && stillOwns !== pid) {
+        process.stderr.write(`claude-code-ai-observability: abort SIGKILL — port ${port} no longer owned by pid ${pid}\n`);
+        return;
+    }
     try {
         process.kill(pid, "SIGKILL");
     }
     catch { /* ignore */ }
 }
-export async function ensureServerRunning(port, configJson) {
-    const info = await probeHealth(port, 500);
-    if (info && info.version === PLUGIN_VERSION)
-        return;
-    if (info) {
-        await killStaleCollector(info.version
-            ? `version mismatch (running=${info.version}, expected=${PLUGIN_VERSION})`
-            : "legacy collector without version metadata", info, port);
+function lockFilePath(port) {
+    return join(CACHE_DIR, `eviction-${port}.lock`);
+}
+/** Atomically create the lock file (O_CREAT|O_EXCL). Returns true if acquired. */
+function tryAcquireLock(lockPath) {
+    try {
+        mkdirSync(CACHE_DIR, { recursive: true });
+        const fd = openSync(lockPath, "wx");
+        try {
+            writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+        }
+        finally {
+            closeSync(fd);
+        }
+        return true;
     }
+    catch {
+        return false;
+    }
+}
+function releaseLock(lockPath) {
+    try {
+        unlinkSync(lockPath);
+    }
+    catch { /* ignore */ }
+}
+function readLock(lockPath) {
+    try {
+        const data = JSON.parse(readFileSync(lockPath, "utf8"));
+        if (data && typeof data.pid === "number" && typeof data.ts === "number")
+            return data;
+    }
+    catch { /* ignore */ }
+    return null;
+}
+function isPidAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function spawnCollector(port, configJson) {
     const here = dirname(fileURLToPath(import.meta.url));
     const indexPath = resolve(here, "index.js");
     if (!existsSync(indexPath))
@@ -183,6 +239,96 @@ export async function ensureServerRunning(port, configJson) {
         if (next && next.version === PLUGIN_VERSION)
             return;
         await new Promise((r) => setTimeout(r, 100));
+    }
+}
+function isHealthyMatch(info) {
+    if (!info?.ok)
+        return false;
+    if (info.version !== PLUGIN_VERSION)
+        return false;
+    // On shared hosts two users with the same plugin version can otherwise accept each
+    // other's collector as healthy and cross-wire events into the wrong Sentry DSN.
+    const myUid = process.getuid?.();
+    if (typeof myUid === "number" && typeof info.uid === "number" && info.uid !== myUid) {
+        return false;
+    }
+    return true;
+}
+async function passiveWaitForHealthy(port, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 150));
+        const info = await probeHealth(port, 200);
+        if (isHealthyMatch(info))
+            return true;
+    }
+    return false;
+}
+export async function ensureServerRunning(port, configJson) {
+    const lockPath = lockFilePath(port);
+    const MAX_LOCK_ATTEMPTS = 3;
+    let occupiedBailWarned = false;
+    try {
+        for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt++) {
+            // Step 1: Fast path — already healthy, version-matched, same user.
+            const info = await probeHealth(port, 500);
+            if (isHealthyMatch(info))
+                return;
+            // Port returned 200 with a non-collector body. Don't try to spawn over it —
+            // our spawn would just hit EADDRINUSE. Warn once and let the user reassign.
+            if (info?.occupied) {
+                if (!occupiedBailWarned) {
+                    process.stderr.write(`claude-code-ai-observability: port ${port} occupied by a non-collector process; ` +
+                        `set SENTRY_COLLECTOR_PORT to a free port or stop the squatter.\n`);
+                    occupiedBailWarned = true;
+                }
+                return;
+            }
+            // Step 2: Try to acquire the advisory lock.
+            if (tryAcquireLock(lockPath)) {
+                try {
+                    // Step 3a: Re-probe — a peer may have just rebirthed the collector.
+                    const recheck = await probeHealth(port, 500);
+                    if (isHealthyMatch(recheck))
+                        return;
+                    if (recheck?.occupied)
+                        return;
+                    // Step 3b: Kill stale (if any) then spawn fresh.
+                    const toEvict = recheck?.ok ? recheck : info?.ok ? info : null;
+                    if (toEvict) {
+                        await killStaleCollector(toEvict.version
+                            ? `version mismatch (running=${toEvict.version}, expected=${PLUGIN_VERSION})`
+                            : "legacy collector without version metadata", toEvict, port);
+                    }
+                    await spawnCollector(port, configJson);
+                }
+                finally {
+                    releaseLock(lockPath);
+                }
+                return;
+            }
+            // Step 4: Lock not acquired — someone else owns it.
+            const lockData = readLock(lockPath);
+            if (!lockData) {
+                // Lock vanished between acquire attempt and read — retry immediately.
+                continue;
+            }
+            const stale = !isPidAlive(lockData.pid) || Date.now() - lockData.ts > 5000;
+            if (stale) {
+                // Remove stale lock and retry (bounded by MAX_LOCK_ATTEMPTS).
+                releaseLock(lockPath);
+                continue;
+            }
+            // Step 4b: Peer is actively working — wait up to 3 s for a healthy collector.
+            // This is the terminal branch: we've observed a live peer and handed off to it.
+            await passiveWaitForHealthy(port, 3000);
+            return;
+        }
+        // Attempts exhausted — one last passive wait, then give up silently.
+        await passiveWaitForHealthy(port, 3000);
+    }
+    catch {
+        // Eviction is best-effort; never throw to the caller.
     }
 }
 function readStdin() {
