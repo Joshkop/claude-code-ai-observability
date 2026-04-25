@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import type * as Sentry from "@sentry/node";
 import type {
   AutoTags,
@@ -22,6 +23,12 @@ import { attachSubagentToEvent, createSubagentSession } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
 import { applyToolError, captureBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
+import {
+  CACHE_DIR,
+  PID_FILE,
+  PLUGIN_VERSION,
+  type CollectorPidFile,
+} from "./plugin-meta.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 
@@ -34,9 +41,31 @@ interface SessionRecord {
   responseModel?: string;
   turnIndex: number;
   autoTags: AutoTags;
+  lastEventAt: number;
 }
 
 const DEFAULT_PORT = 19877;
+const FLUSH_INTERVAL_MS = 30_000;
+const STALE_SESSION_IDLE_MS = 30 * 60_000;
+
+function writePidFile(port: number, startedAt: number): void {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    const data: CollectorPidFile = {
+      pid: process.pid,
+      port,
+      version: PLUGIN_VERSION,
+      startedAt,
+    };
+    writeFileSync(PID_FILE, JSON.stringify(data, null, 2));
+  } catch {
+    // ignore
+  }
+}
+
+function removePidFile(): void {
+  try { unlinkSync(PID_FILE); } catch { /* ignore */ }
+}
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -79,7 +108,17 @@ export function startServer(
       model: event.model,
       turnIndex: -1,
       autoTags,
+      lastEventAt: Date.now(),
     });
+  };
+
+  const reapStaleSession = (sessionId: string, record: SessionRecord): void => {
+    try { closeCurrentTurn(record); } catch { /* ignore */ }
+    for (const [, span] of record.pendingTools) {
+      try { span.end(); } catch { /* ignore */ }
+    }
+    record.pendingTools.clear();
+    sessions.delete(sessionId);
   };
 
   const closeCurrentTurn = (record: SessionRecord): void => {
@@ -219,7 +258,15 @@ export function startServer(
     try { await sentry.flush(5000); } catch { /* ignore */ }
   };
 
+  const touchSession = (event: HookEvent): void => {
+    const sid = (event as { session_id?: string }).session_id;
+    if (!sid) return;
+    const r = sessions.get(sid);
+    if (r) r.lastEventAt = Date.now();
+  };
+
   async function handleEvent(event: HookEvent): Promise<void> {
+    touchSession(event);
     switch (event.hook_event_name) {
       case "SessionStart":
         await handleSessionStart(event);
@@ -242,9 +289,23 @@ export function startServer(
     }
   }
 
+  const startedAt = Date.now();
+
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
-      send(res, 200, "ok");
+      const body = JSON.stringify({
+        ok: true,
+        pid: process.pid,
+        port,
+        version: PLUGIN_VERSION,
+        startedAt,
+        sessions: sessions.size,
+      });
+      send(res, 200, body, "application/json");
+      return;
+    }
+    if (req.method === "GET" && req.url === "/version") {
+      send(res, 200, JSON.stringify({ version: PLUGIN_VERSION }), "application/json");
       return;
     }
     if (req.method === "POST" && req.url === "/hook") {
@@ -280,9 +341,37 @@ export function startServer(
     send(res, 404, "not_found");
   });
 
+  server.on("listening", () => {
+    writePidFile(port, startedAt);
+  });
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    process.stderr.write(`collector listen error: ${err.message}\n`);
+    if (err.code === "EADDRINUSE") {
+      process.exit(2);
+    }
+  });
+
   server.listen(port, "127.0.0.1");
 
+  const flushTimer: NodeJS.Timeout = setInterval(() => {
+    try { void sentry.flush(2000); } catch { /* ignore */ }
+  }, FLUSH_INTERVAL_MS);
+  flushTimer.unref?.();
+
+  const reapTimer: NodeJS.Timeout = setInterval(() => {
+    const now = Date.now();
+    for (const [sid, record] of sessions) {
+      if (now - record.lastEventAt > STALE_SESSION_IDLE_MS) {
+        reapStaleSession(sid, record);
+      }
+    }
+    try { void sentry.flush(2000); } catch { /* ignore */ }
+  }, FLUSH_INTERVAL_MS);
+  reapTimer.unref?.();
+
   const shutdown = async (): Promise<void> => {
+    clearInterval(flushTimer);
+    clearInterval(reapTimer);
     for (const [, record] of sessions) {
       try {
         closeCurrentTurn(record);
@@ -292,6 +381,7 @@ export function startServer(
       } catch { /* ignore */ }
     }
     sessions.clear();
+    removePidFile();
     try { await sentry.flush(5000); } catch { /* ignore */ }
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };

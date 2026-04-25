@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-04-25
+
+### Fixed
+
+- **Stale collectors no longer block new sessions.** A long-lived collector (e.g. one started manually for testing, or surviving across plugin upgrades) used to satisfy the `/health` probe forever, so `ensureServerRunning` never spawned a fresh one. New tmux/CLI sessions appeared to "lose" Sentry data even though the plugin was installed. The hook client now compares the collector's reported version against the plugin version and replaces mismatched or legacy collectors. PID is sourced from the new JSON `/health` response, falling back to a `collector.pid` file, falling back to OS-level listener lookup (`lsof` / `ss` / `fuser`).
+- **`hook.sh` no longer swallows errors.** stderr from the hook client is appended to `~/.cache/claude-code-ai-observability/hook.err.log` instead of `/dev/null`. Port collisions, eviction notices, and crashes now leave a trail.
+- **Listen failures surface clearly.** The collector logs `EADDRINUSE` (and any other listen error) to stderr and exits with code 2 instead of hanging, so a manual `node scripts/index.js --serve …` attempt that races a running collector is obvious.
+
+### Added
+
+- **Identity-aware `/health` endpoint.** `GET /health` now returns JSON `{ ok, pid, port, version, startedAt, sessions }` instead of plain `"ok"`. A new `GET /version` endpoint exposes the same version field.
+- **Collector PID file.** On startup, the collector writes `~/.cache/claude-code-ai-observability/collector.pid` with `{ pid, port, version, startedAt }`; it is removed on graceful shutdown.
+- **Periodic Sentry flush + stale-session reaper.** Every 30 s the collector flushes the Sentry transport and reaps any session that hasn't received an event in 30 minutes (closing its current turn span and pending tool spans). Previously, sessions whose `SessionEnd` hook never fired (e.g. tmux pane killed) left a turn open until the collector was restarted.
+
 ## [0.1.1] - 2026-04-25
 
 ### Fixed

@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 function getPort() {
     return Number(process.env.SENTRY_COLLECTOR_PORT) || DEFAULT_PORT;
@@ -16,12 +17,24 @@ async function probeHealth(port, timeoutMs = 500) {
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!res.ok)
-            return false;
+            return null;
         const text = await res.text();
-        return text.trim() === "ok";
+        const trimmed = text.trim();
+        // Legacy collectors return plain "ok" — treat as version-less.
+        if (trimmed === "ok")
+            return { ok: true };
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && typeof parsed === "object")
+                return parsed;
+        }
+        catch {
+            // ignore parse failures
+        }
+        return null;
     }
     catch {
-        return false;
+        return null;
     }
 }
 export async function sendHookEvent(event, port) {
@@ -38,16 +51,104 @@ export async function sendHookEvent(event, port) {
     }
 }
 function logDir() {
-    const dir = join(homedir(), ".cache", "claude-code-ai-observability");
     try {
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(CACHE_DIR, { recursive: true });
     }
     catch { /* ignore */ }
-    return dir;
+    return CACHE_DIR;
+}
+function readPidFile() {
+    try {
+        const text = readFileSync(PID_FILE, "utf8");
+        const data = JSON.parse(text);
+        if (data && typeof data.pid === "number")
+            return data;
+    }
+    catch {
+        // ignore
+    }
+    return null;
+}
+function findListenerPid(port) {
+    const tries = [
+        ["lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], (out) => {
+                const n = Number(out.split("\n").find((s) => s.trim().length > 0));
+                return Number.isFinite(n) && n > 0 ? n : null;
+            }],
+        ["ss", ["-tlnpH", `sport = :${port}`], (out) => {
+                const m = out.match(/pid=(\d+)/);
+                const n = m ? Number(m[1]) : NaN;
+                return Number.isFinite(n) && n > 0 ? n : null;
+            }],
+        ["fuser", [`${port}/tcp`], (out) => {
+                const n = Number(out.trim().split(/\s+/).find((s) => s.length > 0));
+                return Number.isFinite(n) && n > 0 ? n : null;
+            }],
+    ];
+    for (const [bin, args, parse] of tries) {
+        try {
+            const out = execFileSync(bin, args, {
+                encoding: "utf8",
+                timeout: 1000,
+                stdio: ["ignore", "pipe", "ignore"],
+            });
+            const pid = parse(out);
+            if (pid && pid !== process.pid)
+                return pid;
+        }
+        catch {
+            // try next
+        }
+    }
+    return null;
+}
+async function killStaleCollector(reason, info, port) {
+    let pid = info?.pid;
+    if (!pid) {
+        const pidFile = readPidFile();
+        pid = pidFile?.pid;
+    }
+    if (!pid) {
+        const found = findListenerPid(port);
+        if (found)
+            pid = found;
+    }
+    process.stderr.write(`claude-code-ai-observability: replacing stale collector (${reason}); pid=${pid ?? "unknown"}\n`);
+    if (!pid)
+        return;
+    try {
+        process.kill(pid, "SIGTERM");
+    }
+    catch {
+        // already dead — fine
+        return;
+    }
+    // Wait up to ~2s for graceful shutdown.
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+        try {
+            process.kill(pid, 0);
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        catch {
+            return;
+        }
+    }
+    // Last resort.
+    try {
+        process.kill(pid, "SIGKILL");
+    }
+    catch { /* ignore */ }
 }
 export async function ensureServerRunning(port, configJson) {
-    if (await probeHealth(port, 500))
+    const info = await probeHealth(port, 500);
+    if (info && info.version === PLUGIN_VERSION)
         return;
+    if (info) {
+        await killStaleCollector(info.version
+            ? `version mismatch (running=${info.version}, expected=${PLUGIN_VERSION})`
+            : "legacy collector without version metadata", info, port);
+    }
     const here = dirname(fileURLToPath(import.meta.url));
     const indexPath = resolve(here, "index.js");
     if (!existsSync(indexPath))
@@ -76,10 +177,10 @@ export async function ensureServerRunning(port, configJson) {
         }
         catch { /* ignore */ }
     }
-    // Brief wait so the first event lands cleanly.
     const start = Date.now();
-    while (Date.now() - start < 1000) {
-        if (await probeHealth(port, 200))
+    while (Date.now() - start < 2000) {
+        const next = await probeHealth(port, 200);
+        if (next && next.version === PLUGIN_VERSION)
             return;
         await new Promise((r) => setTimeout(r, 100));
     }

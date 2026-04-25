@@ -1,9 +1,16 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { HookEvent } from "./types.js";
+import {
+  CACHE_DIR,
+  PID_FILE,
+  PLUGIN_VERSION,
+  type CollectorHealth,
+  type CollectorPidFile,
+} from "./plugin-meta.js";
 
 const DEFAULT_PORT = 19877;
 
@@ -15,16 +22,25 @@ function baseUrl(port: number): string {
   return `http://127.0.0.1:${port}`;
 }
 
-async function probeHealth(port: number, timeoutMs = 500): Promise<boolean> {
+async function probeHealth(port: number, timeoutMs = 500): Promise<CollectorHealth | null> {
   try {
     const res = await fetch(`${baseUrl(port)}/health`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const text = await res.text();
-    return text.trim() === "ok";
+    const trimmed = text.trim();
+    // Legacy collectors return plain "ok" — treat as version-less.
+    if (trimmed === "ok") return { ok: true };
+    try {
+      const parsed = JSON.parse(trimmed) as CollectorHealth;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // ignore parse failures
+    }
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -42,13 +58,103 @@ export async function sendHookEvent(event: HookEvent, port: number): Promise<voi
 }
 
 function logDir(): string {
-  const dir = join(homedir(), ".cache", "claude-code-ai-observability");
-  try { mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
-  return dir;
+  try { mkdirSync(CACHE_DIR, { recursive: true }); } catch { /* ignore */ }
+  return CACHE_DIR;
+}
+
+function readPidFile(): CollectorPidFile | null {
+  try {
+    const text = readFileSync(PID_FILE, "utf8");
+    const data = JSON.parse(text) as CollectorPidFile;
+    if (data && typeof data.pid === "number") return data;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function findListenerPid(port: number): number | null {
+  const tries: Array<[string, string[], (out: string) => number | null]> = [
+    ["lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], (out) => {
+      const n = Number(out.split("\n").find((s) => s.trim().length > 0));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }],
+    ["ss", ["-tlnpH", `sport = :${port}`], (out) => {
+      const m = out.match(/pid=(\d+)/);
+      const n = m ? Number(m[1]) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }],
+    ["fuser", [`${port}/tcp`], (out) => {
+      const n = Number(out.trim().split(/\s+/).find((s) => s.length > 0));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }],
+  ];
+  for (const [bin, args, parse] of tries) {
+    try {
+      const out = execFileSync(bin, args, {
+        encoding: "utf8",
+        timeout: 1000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const pid = parse(out);
+      if (pid && pid !== process.pid) return pid;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+async function killStaleCollector(
+  reason: string,
+  info: CollectorHealth | null,
+  port: number,
+): Promise<void> {
+  let pid = info?.pid;
+  if (!pid) {
+    const pidFile = readPidFile();
+    pid = pidFile?.pid;
+  }
+  if (!pid) {
+    const found = findListenerPid(port);
+    if (found) pid = found;
+  }
+  process.stderr.write(
+    `claude-code-ai-observability: replacing stale collector (${reason}); pid=${pid ?? "unknown"}\n`,
+  );
+  if (!pid) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // already dead — fine
+    return;
+  }
+  // Wait up to ~2s for graceful shutdown.
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((r) => setTimeout(r, 100));
+    } catch {
+      return;
+    }
+  }
+  // Last resort.
+  try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
 }
 
 export async function ensureServerRunning(port: number, configJson: string): Promise<void> {
-  if (await probeHealth(port, 500)) return;
+  const info = await probeHealth(port, 500);
+  if (info && info.version === PLUGIN_VERSION) return;
+  if (info) {
+    await killStaleCollector(
+      info.version
+        ? `version mismatch (running=${info.version}, expected=${PLUGIN_VERSION})`
+        : "legacy collector without version metadata",
+      info,
+      port,
+    );
+  }
   const here = dirname(fileURLToPath(import.meta.url));
   const indexPath = resolve(here, "index.js");
   if (!existsSync(indexPath)) return;
@@ -68,10 +174,10 @@ export async function ensureServerRunning(port: number, configJson: string): Pro
     try { closeSync(out); } catch { /* ignore */ }
     try { closeSync(err); } catch { /* ignore */ }
   }
-  // Brief wait so the first event lands cleanly.
   const start = Date.now();
-  while (Date.now() - start < 1000) {
-    if (await probeHealth(port, 200)) return;
+  while (Date.now() - start < 2000) {
+    const next = await probeHealth(port, 200);
+    if (next && next.version === PLUGIN_VERSION) return;
     await new Promise((r) => setTimeout(r, 100));
   }
 }
