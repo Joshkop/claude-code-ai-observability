@@ -68,6 +68,7 @@ export function startServer(sentry, config, baseAutoTags) {
         };
         sessions.set(event.session_id, {
             currentTurnSpan: null,
+            currentTurnStart: null,
             pendingTools: new Map(),
             toolCount: 0,
             transcriptPath: event.transcript_path,
@@ -120,13 +121,16 @@ export function startServer(sentry, config, baseAutoTags) {
             cacheCreationTokens: tokens.cacheCreationTokens,
             outputTokens: tokens.outputTokens,
         }, priceTable);
-        closeTurnSpan(record.currentTurnSpan, {
+        closeTurnSpan(sentry, record.currentTurnSpan, {
             tokens,
             responseModel: record.responseModel ?? record.model,
             response: tokens.response,
             cost,
+            turnStartTime: record.currentTurnStart ?? undefined,
+            sessionId: record.autoTags["claude_code.session_id"],
         }, config);
         record.currentTurnSpan = null;
+        record.currentTurnStart = null;
     };
     const handleUserPrompt = (event) => {
         const record = sessions.get(event.session_id);
@@ -135,6 +139,7 @@ export function startServer(sentry, config, baseAutoTags) {
         closeCurrentTurn(record);
         record.turnIndex += 1;
         const prompt = event.prompt ?? event.message ?? null;
+        record.currentTurnStart = Date.now() / 1000;
         record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
     };
     const handlePreTool = (event) => {

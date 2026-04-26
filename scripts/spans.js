@@ -33,29 +33,51 @@ export function openTurnTransaction(sentry, sessionId, turnIndex, prompt, tags, 
     }
     return span;
 }
-export function closeTurnSpan(turnSpan, input, config, endTime) {
-    const { tokens, responseModel, cost, response } = input;
-    turnSpan.setAttribute("gen_ai.usage.input_tokens", tokens.inputTokens);
-    turnSpan.setAttribute("gen_ai.usage.output_tokens", tokens.outputTokens);
-    turnSpan.setAttribute("gen_ai.usage.total_tokens", tokens.inputTokens + tokens.outputTokens);
-    turnSpan.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cachedInputTokens);
-    if (tokens.cacheCreationTokens) {
-        // Sentry-python's canonical attribute name for Anthropic prompt-cache
-        // writes. Sentry-javascript also accepts the alias `cache_creation_input_tokens`.
-        turnSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
-    }
+export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
+    const { tokens, responseModel, cost, response, turnStartTime, sessionId } = input;
     const respModel = responseModel ?? tokens.model ?? undefined;
+    // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
+    // putting tokens only on the invoke_agent root yields "No Data" in that
+    // widget even though the per-span detail panel shows them correctly. The
+    // canonical Sentry pattern is invoke_agent (root) → chat (child carrying
+    // the LLM-call aggregate). Claude Code hooks don't expose individual API
+    // calls, so we synthesize one chat child per turn that holds the rollup.
+    const chatSpan = sentry.withActiveSpan(turnSpan, () => sentry.startInactiveSpan({
+        op: "gen_ai.chat",
+        name: respModel ? `chat ${respModel}` : "chat",
+        startTime: turnStartTime,
+        attributes: {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "anthropic",
+            "gen_ai.system": "anthropic",
+            ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
+            ...(sessionId ? { "claude_code.session_id": sessionId } : {}),
+            ...(respModel ? { "gen_ai.request.model": respModel } : {}),
+            ...(respModel ? { "gen_ai.response.model": respModel } : {}),
+        },
+    }));
+    chatSpan.setAttribute("gen_ai.usage.input_tokens", tokens.inputTokens);
+    chatSpan.setAttribute("gen_ai.usage.output_tokens", tokens.outputTokens);
+    chatSpan.setAttribute("gen_ai.usage.total_tokens", tokens.inputTokens + tokens.outputTokens);
+    chatSpan.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cachedInputTokens);
+    if (tokens.cacheCreationTokens) {
+        // Sentry-python's canonical name for Anthropic prompt-cache writes.
+        chatSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
+    }
+    if (config.recordOutputs && response) {
+        chatSpan.setAttribute("gen_ai.response.text", serialize(response, config.maxAttributeLength));
+    }
+    chatSpan.end(endTime);
     if (respModel) {
         turnSpan.setAttribute("gen_ai.response.model", respModel);
     }
     if (cost) {
-        // Sentry's manual-monitoring example uses a single rollup attr that the
-        // Insights dashboard surfaces. Per-bucket costs are not a Sentry convention
-        // and Sentry computes its own totals server-side from the token attrs.
+        // Sentry's manual-monitoring example pattern: a single rollup attribute
+        // on the agent root. Sentry computes its own server-side gen_ai.cost.*
+        // values from the token attrs on the chat child, so this rollup is
+        // additive — it lets you query plugin-priced totals when the model
+        // isn't in Sentry's price table.
         turnSpan.setAttribute("conversation.cost_estimate_usd", cost.totalCost);
-    }
-    if (config.recordOutputs && response) {
-        turnSpan.setAttribute("gen_ai.response.text", serialize(response, config.maxAttributeLength));
     }
     turnSpan.end(endTime);
 }

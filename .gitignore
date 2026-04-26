@@ -8,3 +8,4 @@ scripts/package-lock.json
 .omc/plans/
 .omc/project-memory.json
 .omc/notepad.md
+.omc/sessions/
