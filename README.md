@@ -54,56 +54,26 @@ Then register the hooks in your Claude Code settings (`.claude/settings.json`):
 
 ## Migrating from `sergical/claude-code-sentry-monitor`
 
-If you previously installed the upstream plugin, do this **in a fresh terminal** so old hooks don't double-fire alongside the new ones:
-
-**1. Remove the upstream plugin.** Inside a Claude Code session:
-
-```
-/plugin
-```
-
-…then pick `claude-code-sentry-monitor` and choose "Uninstall". Also remove its marketplace entry so it can't auto-update back in:
+In a fresh Claude Code session, run these four slash commands in order:
 
 ```
 /plugin marketplace remove sergical
-```
-
-If you installed it manually instead of via the marketplace, delete its hook entries from `.claude/settings.json` (or `~/.claude/settings.json`).
-
-**2. Stop any running upstream collector.** Upstream listens on port 19876; this fork moved to 19877 to avoid collisions. Kill the upstream listener so it doesn't shadow the new install:
-
-```bash
-kill "$(lsof -ti tcp:19876)" 2>/dev/null || true
-rm -f ~/.cache/claude-code-sentry-monitor/*.pid 2>/dev/null || true
-```
-
-**3. Install this fork.**
-
-```
+/plugin uninstall claude-code-sentry-monitor
 /plugin marketplace add Joshkop/claude-code-ai-observability
 /plugin install claude-code-ai-observability
 ```
 
-**4. Let Claude configure Sentry.** Open a new Claude Code session and say:
+(If `/plugin uninstall <name>` errors on your version of Claude Code, run `/plugin` and pick "Uninstall" interactively instead.)
+
+Then in a **new** Claude Code session, just say:
 
 > set up Sentry monitoring
 
-The bundled skill auto-detects your GitHub login (or git email / `whoami`), prompts for your Sentry DSN, and writes the config to `~/.config/claude-code/sentry-monitor.json`. If you'd rather edit it by hand, the minimum config is:
+The bundled skill takes over from there: it detects and kills any leftover upstream collector on port 19876, wipes the old `~/.cache/claude-code-sentry-monitor/` directory, prompts for your Sentry DSN, writes `~/.config/claude-code/sentry-monitor.json`, and runs the doctor to verify. Open a new terminal afterwards and your next turn will appear in Sentry's AI Agents dashboard within seconds.
 
-```json
-{
-  "dsn": "https://<key>@o<org>.ingest.sentry.io/<project>",
-  "tracesSampleRate": 1
-}
-```
+### Windows
 
-**5. Verify.** Run the bundled doctor:
-
-```bash
-bash ~/.claude/plugins/cache/joshkop/claude-code-ai-observability/*/scripts/doctor.sh
-```
-
-It should end with `OK: collector reachable, version 0.1.4, pid <N>`. Open a new Claude Code session, send a prompt, and the turn will show up in Sentry's AI Agents dashboard within a few seconds.
+The runtime hooks are pure Node and run on any platform Claude Code supports. The bundled `scripts/doctor.sh` and `scripts/smoke-test.sh` are POSIX bash, so on **native Windows** (PowerShell/cmd) they need WSL or Git Bash. The setup skill includes PowerShell-equivalent commands for the cleanup step, so the migration flow itself works on native Windows — you just won't get the bash doctor unless you run it from WSL or Git Bash.
 
 ## Configuration
 

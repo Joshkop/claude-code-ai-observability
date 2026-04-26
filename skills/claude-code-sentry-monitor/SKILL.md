@@ -9,11 +9,71 @@ You are setting up the `claude-code-ai-observability` plugin, which instruments 
 
 ## What you will do
 
-1. Check for an existing config file — offer to update it if found
-2. Auto-detect developer identity
-3. Ask the user a small set of questions
-4. Write the config file to `~/.config/claude-code/sentry-monitor.json`
-5. Confirm and offer to verify
+1. Detect and clean up any legacy `sergical/claude-code-sentry-monitor` install
+2. Check for an existing config file — offer to update it if found
+3. Auto-detect developer identity
+4. Ask the user a small set of questions
+5. Write the config file to `~/.config/claude-code/sentry-monitor.json`
+6. Run the doctor and report status
+
+---
+
+## Step 0 — Detect & clean up legacy upstream install
+
+Before touching config, look for any leftovers from `sergical/claude-code-sentry-monitor`. The upstream plugin and this fork can fight over the collector port and double-fire hooks if both are active.
+
+Run these probes (silently — only surface output if something is found):
+
+```bash
+# A. Is the upstream plugin still installed via the marketplace?
+node -e '
+  try {
+    const j = require(require("os").homedir() + "/.claude/plugins/installed_plugins.json");
+    const t = j.plugins || j;
+    const found = Object.keys(t).find(k => k.startsWith("claude-code-sentry-monitor@"));
+    console.log(found || "");
+  } catch { console.log(""); }
+'
+
+# B. Is anything listening on the upstream default port 19876?
+( lsof -ti tcp:19876 2>/dev/null || ss -tlnp 2>/dev/null | awk -F'[ :]+' '/:19876 /{for(i=1;i<=NF;i++)if($i~/pid=/){gsub(/pid=|,.*/,"",$i);print $i}}' ) | head -1
+
+# C. Stale cache from upstream?
+ls -1 ~/.cache/claude-code-sentry-monitor/ 2>/dev/null
+```
+
+**If any of A/B/C returns non-empty**, tell the user what you found and ask: **"I see leftovers from the upstream `sergical/claude-code-sentry-monitor` plugin. Want me to clean them up so the new install can take over cleanly?"** Default to yes.
+
+If they confirm, run the cleanup:
+
+```bash
+# Kill any upstream collector on port 19876
+PID="$(lsof -ti tcp:19876 2>/dev/null | head -1)"
+[ -n "$PID" ] && kill "$PID" 2>/dev/null && sleep 0.5
+[ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null
+
+# Wipe upstream cache
+rm -rf ~/.cache/claude-code-sentry-monitor 2>/dev/null
+
+# Also evict any stale collector for this fork (any version mismatch with the installed plugin)
+PID2="$(cat ~/.cache/claude-code-ai-observability/collector.pid 2>/dev/null | node -e 'try{const j=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(j.pid||"")}catch{console.log("")}')"
+[ -n "$PID2" ] && kill "$PID2" 2>/dev/null
+rm -f ~/.cache/claude-code-ai-observability/collector.pid 2>/dev/null
+```
+
+If the user is on **native Windows (PowerShell, not WSL)** — detectable via `$env:OS -eq 'Windows_NT'` and the absence of `bash`/`lsof` — use these instead:
+
+```powershell
+Get-NetTCPConnection -LocalPort 19876 -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\claude-code-sentry-monitor" -ErrorAction SilentlyContinue
+Remove-Item -Force "$env:USERPROFILE\.cache\claude-code-ai-observability\collector.pid" -ErrorAction SilentlyContinue
+```
+
+**Important:** the upstream plugin itself must be removed via Claude Code slash commands (`/plugin marketplace remove sergical` then `/plugin uninstall claude-code-sentry-monitor`) — those cannot be invoked from inside this skill. If A returned a non-empty result, **tell the user** to run those two commands in their next message and re-invoke the skill afterwards. Do not proceed to Step 1 in that case.
+
+If A was empty (only B/C had leftovers — i.e. the user already uninstalled the plugin but processes/cache remained), proceed to Step 1 after cleanup.
 
 ---
 
@@ -101,14 +161,25 @@ Example fuller config:
 
 ---
 
-## Step 5 — Confirm and verify
+## Step 5 — Run doctor & confirm
 
-Show the user the config that was written and where it was saved.
+Show the user the config that was written and where it was saved, then **run the doctor automatically** (don't ask):
 
-Then tell them:
-> "The plugin will activate automatically on your next Claude Code session. Each user turn becomes a `gen_ai.invoke_agent` transaction in your Sentry AI Agents dashboard, with per-turn token counts, USD cost, and tool spans."
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/scripts/doctor.sh"
+```
 
-If they want to verify the install, point them at `bash $CLAUDE_PLUGIN_ROOT/scripts/doctor.sh` — it probes the local collector, checks the DSN config, and reports recent errors.
+On native Windows (no bash), run the equivalent inline check:
+
+```powershell
+node -e "fetch('http://127.0.0.1:' + (process.env.SENTRY_COLLECTOR_PORT || 19877) + '/health').then(r=>r.json()).then(j=>console.log(JSON.stringify(j,null,2))).catch(e=>console.log('collector not running:', e.message))"
+```
+
+Report the result to the user:
+
+- **Doctor ends with `OK: collector reachable…`** → tell them: *"You're set. Open a fresh Claude Code session — your next turn will appear in Sentry's AI Agents dashboard within seconds. Each user turn becomes a `gen_ai.invoke_agent` transaction with per-turn token counts, USD cost, and tool spans."*
+- **Doctor ends with `NOT OK: collector not running`** → that's expected if no Claude Code session has started yet. Tell the user: *"Config is written. The collector starts on demand from the first hook of your next Claude Code session — open a new terminal and run `claude` to spin it up, then re-run the doctor to confirm."*
+- **`NOT OK: no DSN configured`** → something went wrong with the file write. Re-check the file path and contents, then re-run.
 
 ---
 
