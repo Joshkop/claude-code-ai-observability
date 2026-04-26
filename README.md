@@ -24,6 +24,12 @@ Comprehensive AI Agent Observability plugin for Claude Code. Sends realtime Open
 /plugin install claude-code-ai-observability
 ```
 
+Then, in a fresh Claude Code session, just say:
+
+> set up Sentry monitoring
+
+The bundled setup skill walks you through it: paste your Sentry DSN (Sentry → Project Settings → Client Keys), pick an optional environment / sample rate / developer tag, and the skill writes `~/.config/claude-code/sentry-monitor.json` for you. Open a new terminal and the next turn you take will appear in your Sentry AI Agents dashboard within seconds.
+
 ### Manual install
 
 ```bash
@@ -45,6 +51,59 @@ Then register the hooks in your Claude Code settings (`.claude/settings.json`):
   }
 }
 ```
+
+## Migrating from `sergical/claude-code-sentry-monitor`
+
+If you previously installed the upstream plugin, do this **in a fresh terminal** so old hooks don't double-fire alongside the new ones:
+
+**1. Remove the upstream plugin.** Inside a Claude Code session:
+
+```
+/plugin
+```
+
+…then pick `claude-code-sentry-monitor` and choose "Uninstall". Also remove its marketplace entry so it can't auto-update back in:
+
+```
+/plugin marketplace remove sergical
+```
+
+If you installed it manually instead of via the marketplace, delete its hook entries from `.claude/settings.json` (or `~/.claude/settings.json`).
+
+**2. Stop any running upstream collector.** Upstream listens on port 19876; this fork moved to 19877 to avoid collisions. Kill the upstream listener so it doesn't shadow the new install:
+
+```bash
+kill "$(lsof -ti tcp:19876)" 2>/dev/null || true
+rm -f ~/.cache/claude-code-sentry-monitor/*.pid 2>/dev/null || true
+```
+
+**3. Install this fork.**
+
+```
+/plugin marketplace add Joshkop/claude-code-ai-observability
+/plugin install claude-code-ai-observability
+```
+
+**4. Let Claude configure Sentry.** Open a new Claude Code session and say:
+
+> set up Sentry monitoring
+
+The bundled skill auto-detects your GitHub login (or git email / `whoami`), prompts for your Sentry DSN, and writes the config to `~/.config/claude-code/sentry-monitor.json`. If you'd rather edit it by hand, the minimum config is:
+
+```json
+{
+  "dsn": "https://<key>@o<org>.ingest.sentry.io/<project>",
+  "tracesSampleRate": 1
+}
+```
+
+**5. Verify.** Run the bundled doctor:
+
+```bash
+bash ~/.claude/plugins/cache/joshkop/claude-code-ai-observability/*/scripts/doctor.sh
+```
+
+It should end with `OK: collector reachable, version 0.1.4, pid <N>`. Open a new Claude Code session, send a prompt, and the turn will show up in Sentry's AI Agents dashboard within a few seconds.
 
 ## Configuration
 
