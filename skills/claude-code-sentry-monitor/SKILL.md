@@ -1,11 +1,11 @@
 ---
 name: claude-code-sentry-monitor
-description: Set up Sentry observability for Claude Code sessions. Use when someone says "set up Sentry monitoring", "add observability to Claude Code", "configure claude-code-sentry-monitor", "trace Claude Code sessions", "monitor Claude Code with Sentry", or "instrument Claude Code". Interactively collects DSN and preferences, then writes the config file.
+description: Set up Sentry observability for Claude Code sessions. Use when someone says "set up Sentry monitoring", "add observability to Claude Code", "configure claude-code-ai-observability", "trace Claude Code sessions", "monitor Claude Code with Sentry", or "instrument Claude Code". Interactively collects DSN and preferences, then writes the config file.
 ---
 
-# claude-code-sentry-monitor Setup Wizard
+# claude-code-ai-observability Setup Wizard
 
-You are setting up the `claude-code-sentry-monitor` plugin, which instruments Claude Code sessions as distributed traces in Sentry. This is a developer-level tool — the config is global (per-machine), not per-project.
+You are setting up the `claude-code-ai-observability` plugin, which instruments Claude Code sessions as realtime distributed traces in Sentry. This is a developer-level tool — the config is global (per-machine), not per-project.
 
 ## What you will do
 
@@ -22,7 +22,8 @@ You are setting up the `claude-code-sentry-monitor` plugin, which instruments Cl
 Look for an existing config in these locations (in order):
 1. `CLAUDE_SENTRY_CONFIG` env var (if set)
 2. `~/.config/claude-code/sentry-monitor.json` (main config)
-3. `~/.config/sentry-claude/config` (legacy KEY=VALUE format)
+3. `~/.config/claude-code/sentry-monitor.jsonc` (with-comments variant)
+4. `~/.config/sentry-claude/config` (legacy KEY=VALUE format)
 
 Use the `read` tool to check each. If one exists, show the current config and ask: **"A config already exists — do you want to update it or leave it as-is?"**
 
@@ -54,7 +55,7 @@ Ask these questions, showing auto-detected values as defaults:
 
 3. **Environment** *(optional)* — "What environment name should appear on traces? e.g. `development`, `production`. Leave blank to omit."
 
-4. **Record tool inputs/outputs** — "Record tool inputs and outputs as span attributes? Useful for debugging but can be verbose. (yes/no, default: yes)"
+4. **Record tool inputs/outputs** — "Record tool inputs and outputs as span attributes? Useful for debugging but can be verbose. Output is secret-redacted before upload. (yes/no, default: yes)"
 
 5. **Traces sample rate** *(optional)* — "What fraction of sessions to trace? `1` = 100%, `0.5` = 50%. Leave blank for the default (1)."
 
@@ -80,7 +81,7 @@ Example minimal config:
 {
   "dsn": "https://abc123@o456.ingest.sentry.io/789",
   "tags": {
-    "developer": "sergical"
+    "developer": "joshkop"
   }
 }
 ```
@@ -93,7 +94,7 @@ Example fuller config:
   "recordOutputs": false,
   "tracesSampleRate": 0.5,
   "tags": {
-    "developer": "sergical"
+    "developer": "joshkop"
   }
 }
 ```
@@ -105,7 +106,9 @@ Example fuller config:
 Show the user the config that was written and where it was saved.
 
 Then tell them:
-> "The plugin will activate automatically on your next Claude Code session. Tool calls will appear as spans in your Sentry AI Agents dashboard."
+> "The plugin will activate automatically on your next Claude Code session. Each user turn becomes a `gen_ai.invoke_agent` transaction in your Sentry AI Agents dashboard, with per-turn token counts, USD cost, and tool spans."
+
+If they want to verify the install, point them at `bash $CLAUDE_PLUGIN_ROOT/scripts/doctor.sh` — it probes the local collector, checks the DSN config, and reports recent errors.
 
 ---
 
@@ -115,16 +118,21 @@ Then tell them:
 |-------|---------|-------------|
 | `dsn` | required | Sentry DSN |
 | `environment` | — | Environment tag |
+| `release` | — | Release tag |
 | `recordInputs` | `true` | Capture tool input args as span attributes |
-| `recordOutputs` | `true` | Capture tool output as span attributes |
-| `tracesSampleRate` | `1` | Fraction of sessions to trace (0-1) |
+| `recordOutputs` | `true` | Capture tool output as span attributes (secret-redacted) |
+| `tracesSampleRate` | `1` | Fraction of sessions to trace (0–1) |
 | `maxAttributeLength` | `12000` | Max chars per span attribute |
-| `enableMetrics` | `false` | Emit Sentry token usage metrics |
+| `debug` | `false` | Enable Sentry SDK debug logging |
 | `tags` | `{}` | Custom tags on every span |
-| `mode` | `batch` | `batch` (default) or `realtime` |
+| `prices` | — | Per-model price overrides for `gen_ai.usage.cost.*` |
+
+The plugin is realtime-only as of v0.1.0 — there is no `mode` field. Each turn flushes its own root transaction; there is no session-end batch.
 
 ## Troubleshooting
 
-**No traces appearing** — Check the DSN, ensure `tracesSampleRate` is `1`. Traces flush at session end in batch mode.
+**No traces appearing** — Check the DSN, ensure `tracesSampleRate` is `1`. Run `bash $CLAUDE_PLUGIN_ROOT/scripts/doctor.sh` for a full diagnostic (collector health, PID file, listening process, DSN path, recent hook + collector errors).
 
-**Plugin not loading** — Start Claude Code with `claude --plugin-dir /path/to/claude-code-sentry-monitor`, or install permanently via `/plugin marketplace add sergical/claude-code-sentry-monitor`.
+**Plugin not loading** — Install via `/plugin marketplace add Joshkop/claude-code-ai-observability` then `/plugin install claude-code-ai-observability`, or clone manually and register the hooks in `.claude/settings.json` per the plugin README.
+
+**Stale collector squatting on the port** — v0.1.2+ auto-evicts collectors with a mismatched version. If you upgraded from an older fork, run `kill $(cat ~/.cache/claude-code-ai-observability/collector.pid)` and start a fresh session.

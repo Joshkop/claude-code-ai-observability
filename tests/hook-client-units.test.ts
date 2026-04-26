@@ -136,8 +136,15 @@ describe("probeHealth: JSON response parsing", () => {
   });
 
   it("returns null when no server is listening (connection refused)", async () => {
-    // Use a port that is almost certainly not in use.
-    const result = await probeHealth(19876, 200);
+    const srv = createServer();
+    await new Promise<void>((resolve, reject) => {
+      srv.listen(0, "127.0.0.1", () => resolve());
+      srv.on("error", reject);
+    });
+    const freePort = (srv.address() as { port: number }).port;
+    await new Promise<void>((res) => srv.close(() => res()));
+
+    const result = await probeHealth(freePort, 200);
     expect(result).toBeNull();
   });
 });
