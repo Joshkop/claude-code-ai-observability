@@ -1,6 +1,6 @@
 {
   "name": "claude-code-ai-observability",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Comprehensive AI Agent Observability plugin for Claude Code — realtime Sentry traces with per-turn tokens, cost, subagent and error instrumentation, and rich auto-tagging (session / git / host).",
   "type": "module",
   "scripts": {

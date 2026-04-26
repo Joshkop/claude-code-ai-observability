@@ -71,12 +71,20 @@ describe("openTurnTransaction attribute contract", () => {
     expect(span.attrs["gen_ai.operation.name"]).toBe("invoke_agent");
   });
 
-  it("sets gen_ai.system=anthropic and gen_ai.agent.name=claude-code", () => {
+  it("sets gen_ai.provider.name + legacy gen_ai.system + gen_ai.agent.name", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
     const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(span.attrs["gen_ai.provider.name"]).toBe("anthropic");
     expect(span.attrs["gen_ai.system"]).toBe("anthropic");
     expect(span.attrs["gen_ai.agent.name"]).toBe("claude-code");
+  });
+
+  it("sets gen_ai.conversation.id to the session id for cross-turn grouping", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "sess-conv-1", 0, null, baseTags, baseConfig);
+    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(span.attrs["gen_ai.conversation.id"]).toBe("sess-conv-1");
   });
 
   it("sets claude_code.session_id and claude_code.turn_index", () => {
@@ -142,7 +150,7 @@ describe("closeTurnSpan attribute contract", () => {
     };
   }
 
-  it("sets input/output/total/cached token attributes", () => {
+  it("sets input/output/total/cached/cache_write token attributes", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
@@ -153,6 +161,17 @@ describe("closeTurnSpan attribute contract", () => {
     expect(turnSpan.attrs["gen_ai.usage.output_tokens"]).toBe(60);
     expect(turnSpan.attrs["gen_ai.usage.total_tokens"]).toBe(210);
     expect(turnSpan.attrs["gen_ai.usage.input_tokens.cached"]).toBe(30);
+    expect(turnSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(20);
+  });
+
+  it("does not emit cache_write when cacheCreationTokens is zero", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
+    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+
+    closeTurnSpan(turn as never, { tokens: makeTokens({ cacheCreationTokens: 0 }) }, baseConfig);
+
+    expect(turnSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBeUndefined();
   });
 
   it("sets gen_ai.response.model from tokens.model", () => {
@@ -175,7 +194,7 @@ describe("closeTurnSpan attribute contract", () => {
     expect(turnSpan.attrs["gen_ai.response.model"]).toBe("claude-haiku-4-5-20251001");
   });
 
-  it("sets cost attributes when cost is provided", () => {
+  it("sets conversation.cost_estimate_usd rollup when cost is provided", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
@@ -189,19 +208,36 @@ describe("closeTurnSpan attribute contract", () => {
       baseConfig,
     );
 
-    expect(turnSpan.attrs["gen_ai.usage.cost.input_tokens"]).toBe(0.001);
-    expect(turnSpan.attrs["gen_ai.usage.cost.output_tokens"]).toBe(0.002);
-    expect(turnSpan.attrs["gen_ai.usage.cost.total_tokens"]).toBe(0.003);
+    expect(turnSpan.attrs["conversation.cost_estimate_usd"]).toBe(0.003);
   });
 
-  it("does not set cost attributes when cost is absent", () => {
+  it("does not emit per-bucket gen_ai.usage.cost.* — Sentry has no such convention", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
+    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+
+    closeTurnSpan(
+      turn as never,
+      {
+        tokens: makeTokens(),
+        cost: { inputCost: 0.001, outputCost: 0.002, totalCost: 0.003 },
+      },
+      baseConfig,
+    );
+
+    expect(turnSpan.attrs["gen_ai.usage.cost.input_tokens"]).toBeUndefined();
+    expect(turnSpan.attrs["gen_ai.usage.cost.output_tokens"]).toBeUndefined();
+    expect(turnSpan.attrs["gen_ai.usage.cost.total_tokens"]).toBeUndefined();
+  });
+
+  it("does not emit conversation.cost_estimate_usd when cost is absent", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(turn as never, { tokens: makeTokens() }, baseConfig);
 
-    expect(turnSpan.attrs["gen_ai.usage.cost.input_tokens"]).toBeUndefined();
+    expect(turnSpan.attrs["conversation.cost_estimate_usd"]).toBeUndefined();
   });
 });
 
@@ -222,5 +258,29 @@ describe("createToolSpan parent behavior", () => {
     expect(sentry.startCalls).toHaveLength(1);
     expect(sentry.startCalls[0].op).toBe("gen_ai.execute_tool");
     expect(sentry.startCalls[0].forceTransaction).toBe(true);
+  });
+
+  it("sets gen_ai.tool.call.id when tool_use_id is provided", () => {
+    const sentry = makeFakeSentry();
+    const span = createToolSpan(
+      sentry as never,
+      null,
+      "Bash",
+      undefined,
+      baseConfig,
+      undefined,
+      "toolu_abc123",
+    );
+    const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(fake.attrs["gen_ai.tool.call.id"]).toBe("toolu_abc123");
+    expect(fake.attrs["gen_ai.tool.type"]).toBe("function");
+    expect(fake.attrs["gen_ai.provider.name"]).toBe("anthropic");
+  });
+
+  it("does not set gen_ai.tool.call.id when tool_use_id is absent", () => {
+    const sentry = makeFakeSentry();
+    const span = createToolSpan(sentry as never, null, "Bash", undefined, baseConfig);
+    const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(fake.attrs["gen_ai.tool.call.id"]).toBeUndefined();
   });
 });

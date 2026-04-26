@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import os from "node:os";
 import { loadConfig, resolveDefaults } from "./config.js";
 import { startServer } from "./server.js";
 const require = createRequire(import.meta.url);
@@ -25,6 +26,21 @@ async function startCollector(config) {
         release: config.release,
         debug: config.debug,
     });
+    // Tag every event with the operating-system user so Sentry's built-in
+    // "user" filter splits traces by developer on shared hosts. We deliberately
+    // avoid email / IP — those would be PII without the user opting in.
+    try {
+        const ui = os.userInfo();
+        if (ui.username) {
+            Sentry.setUser({
+                username: ui.username,
+                ...(typeof ui.uid === "number" && ui.uid >= 0 ? { id: String(ui.uid) } : {}),
+            });
+        }
+    }
+    catch {
+        // os.userInfo can throw on sandboxes with no uid mapping; skip silently.
+    }
     startServer(Sentry, config, {});
 }
 async function main() {

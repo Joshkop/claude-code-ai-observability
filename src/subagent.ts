@@ -42,12 +42,14 @@ export function createSubagentSpan(
 
   const name = `invoke_agent ${subagentType ?? "subagent"}`;
   const attributes: Record<string, string> = {
+    "gen_ai.provider.name": "anthropic",
     "gen_ai.system": "anthropic",
     "gen_ai.operation.name": "invoke_agent",
   };
   if (subagentType) attributes["gen_ai.agent.name"] = subagentType;
   if (description) attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
   if (prompt) attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
+  if (event.tool_use_id) attributes["gen_ai.tool.call.id"] = event.tool_use_id;
 
   const startSpan = (sentry as unknown as {
     startInactiveSpan?: (opts: unknown) => Span;

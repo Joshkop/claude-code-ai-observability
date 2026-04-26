@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.4] - 2026-04-26
+
+### Changed
+
+- **Sentry-recognized cost attribute.** Per-turn USD cost is now emitted as a single `conversation.cost_estimate_usd` rollup on the `gen_ai.invoke_agent` turn span (the attribute name used by Sentry's manual-monitoring example). The previous `gen_ai.usage.cost.input_tokens` / `cost.output_tokens` / `cost.total_tokens` attrs were custom to this plugin — Sentry's SDK constants and dashboard widgets do not recognize them, and Sentry computes its own server-side totals from the standard token attrs. They are removed; the rollup is the only published cost attribute now.
+- **`gen_ai.usage.input_tokens.cache_creation` renamed to `gen_ai.usage.input_tokens.cache_write`** to match Sentry-Python's `GEN_AI_USAGE_INPUT_TOKENS_CACHE_WRITE` constant. The previous name was neither the Sentry nor the OTel canonical form.
+- **`gen_ai.provider.name` added** alongside the legacy `gen_ai.system` attribute. Sentry's newer SDKs prefer `provider.name`; we dual-emit so older versions continue to work.
+
+### Added
+
+- **`gen_ai.conversation.id` on every turn span**, set to the Claude Code session ID. This is the OTel-spec attribute that Sentry's AI Agents list uses for cross-turn grouping; it complements the existing `claude_code.session_id` plugin tag.
+- **`gen_ai.tool.call.id` on tool spans**, set to Claude Code's `tool_use_id`. Lets Sentry correlate the model's tool-call request to the resulting `gen_ai.execute_tool` span; previously the spans had no shared identifier.
+- **`gen_ai.tool.type = "function"`** on tool spans (Sentry-recognized).
+- **`Sentry.setUser({ username, id })`** at collector startup, derived from `os.userInfo()`. Populates Sentry's first-class user filter so traces split cleanly per developer on shared hosts. Email and IP are not collected.
+- **`service.name = "claude-code-ai-observability"` and `service.version`** auto-tags. `service.name` is Sentry's first-class service field; `service.version` carries the plugin version so trace filters can pin to a specific release.
+- **More resource attrs for filtering**: `host.arch`, `os.version`, `process.runtime.name = "node"`, `process.runtime.version`, `process.executable.path`. All emitted as searchable span tags.
+
+### Fixed
+
+- **CHANGELOG correction.** The v0.1.0 entry below claimed "Correct `gen_ai.chat` operation on turn spans" — that was never implemented. Turn spans have always used `gen_ai.invoke_agent`, which is correct (a Claude Code turn is one agent invocation, not a single chat completion). The bullet has been struck through; nothing in the runtime changed because of this fix.
+- **CHANGELOG correction.** The v0.1.0 cost attribute names listed in the "USD cost calculation" bullet (`gen_ai.usage.cost.*`) were not Sentry conventions. The bullet has been updated to reflect the v0.1.4 attribute name (`conversation.cost_estimate_usd`).
+
 ## [0.1.3] - 2026-04-25
 
 ### Fixed
@@ -53,10 +75,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Realtime-only collector** — dropped batch mode; all events are processed immediately via a local HTTP server that Claude Code hooks POST to.
-- **Correct `gen_ai.chat` operation** on turn spans (upstream used `gen_ai.request`); Sentry's "Tokens Used" dashboard widget requires `gen_ai.chat` to aggregate correctly.
-- **Per-turn token attributes** on `gen_ai.chat` spans: `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`, `gen_ai.usage.input_tokens.cached` — extracted live from the session transcript at each turn boundary.
+- ~~**Correct `gen_ai.chat` operation** on turn spans (upstream used `gen_ai.request`); Sentry's "Tokens Used" dashboard widget requires `gen_ai.chat` to aggregate correctly.~~ *(Corrected in v0.1.4: this was never implemented and the description was wrong. Turn spans use `gen_ai.invoke_agent` — the correct op for a per-turn agent invocation.)*
+- **Per-turn token attributes** on `gen_ai.invoke_agent` turn spans: `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`, `gen_ai.usage.input_tokens.cached` — extracted live from the session transcript at each turn boundary.
 - **Subagent spans**: Task-tool invocations produce nested `gen_ai.invoke_agent` spans with `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name` set from `subagent_type`, and proper open/close lifecycle tied to `PreToolUse`/`PostToolUse` events.
-- **USD cost calculation** per turn and session total (`gen_ai.usage.cost.input_tokens`, `cost.output_tokens`, `cost.total_tokens`) using a built-in price table for Opus/Sonnet/Haiku, with cached input priced at the `cacheRead` rate and an env-overridable price table (`CLAUDE_AIOBS_PRICE_OVERRIDES`).
+- **USD cost calculation** per turn using a built-in price table for Opus/Sonnet/Haiku, with cached input priced at the `cacheRead` rate and an env-overridable price table (`CLAUDE_AIOBS_PRICE_OVERRIDES`). *(v0.1.4: cost is published as a single `conversation.cost_estimate_usd` rollup on the turn span; v0.1.0–v0.1.3 emitted custom `gen_ai.usage.cost.*` attrs that no Sentry widget consumed.)*
 - **Rich auto-tagging** on every span: `claude_code.session_id/session_name/version`, `vcs.repository.name/url`, `vcs.ref.head.name/revision`, `host.name`, `os.type`, `process.cwd`, `process.pid` — all detected non-blocking and cached once per session with graceful degradation when git/tmux are absent.
 - **`PreCompact` and `Stop` hook support** — events are accepted and handled as no-ops so hooks never fail on these event types.
 - **WSL2-safe health probes** — hook client uses `AbortSignal.timeout(500)` to avoid hanging on silently-dropped ports in WSL2 environments.

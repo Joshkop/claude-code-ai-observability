@@ -32,8 +32,10 @@ export function openTurnTransaction(
     startTime,
     attributes: {
       "gen_ai.agent.name": "claude-code",
+      "gen_ai.provider.name": "anthropic",
       "gen_ai.system": "anthropic",
       "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.conversation.id": sessionId,
       "claude_code.session_id": sessionId,
       "claude_code.turn_index": turnIndex,
       ...(model ? { "gen_ai.request.model": model } : {}),
@@ -72,16 +74,19 @@ export function closeTurnSpan(
   );
   turnSpan.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cachedInputTokens);
   if (tokens.cacheCreationTokens) {
-    turnSpan.setAttribute("gen_ai.usage.input_tokens.cache_creation", tokens.cacheCreationTokens);
+    // Sentry-python's canonical attribute name for Anthropic prompt-cache
+    // writes. Sentry-javascript also accepts the alias `cache_creation_input_tokens`.
+    turnSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
   }
   const respModel = responseModel ?? tokens.model ?? undefined;
   if (respModel) {
     turnSpan.setAttribute("gen_ai.response.model", respModel);
   }
   if (cost) {
-    turnSpan.setAttribute("gen_ai.usage.cost.input_tokens", cost.inputCost);
-    turnSpan.setAttribute("gen_ai.usage.cost.output_tokens", cost.outputCost);
-    turnSpan.setAttribute("gen_ai.usage.cost.total_tokens", cost.totalCost);
+    // Sentry's manual-monitoring example uses a single rollup attr that the
+    // Insights dashboard surfaces. Per-bucket costs are not a Sentry convention
+    // and Sentry computes its own totals server-side from the token attrs.
+    turnSpan.setAttribute("conversation.cost_estimate_usd", cost.totalCost);
   }
   if (config.recordOutputs && response) {
     turnSpan.setAttribute(
@@ -99,6 +104,7 @@ export function createToolSpan(
   input: unknown,
   config: ResolvedPluginConfig,
   startTime?: number,
+  toolUseId?: string,
 ): Span {
   const start = (): Span => {
     const span = sentry.startInactiveSpan({
@@ -108,8 +114,11 @@ export function createToolSpan(
       ...(parentSpan ? {} : { forceTransaction: true }),
       attributes: {
         "gen_ai.tool.name": toolName,
+        "gen_ai.tool.type": "function",
         "gen_ai.operation.name": "execute_tool",
+        "gen_ai.provider.name": "anthropic",
         "gen_ai.system": "anthropic",
+        ...(toolUseId ? { "gen_ai.tool.call.id": toolUseId } : {}),
       },
     });
     if (config.recordInputs && input !== undefined) {

@@ -1,6 +1,7 @@
 import { exec } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { PLUGIN_VERSION } from "./plugin-meta.js";
 function run(args, timeoutMs = 2000) {
     return new Promise((resolve, reject) => {
         const [cmd, ...rest] = args;
@@ -110,18 +111,38 @@ export async function detectContext(sessionId, cwd) {
         : repoRoot
             ? path.basename(repoRoot)
             : undefined;
+    let username;
+    let userId;
+    try {
+        const ui = os.userInfo();
+        username = ui.username || undefined;
+        userId = typeof ui.uid === "number" && ui.uid >= 0 ? String(ui.uid) : undefined;
+    }
+    catch {
+        // os.userInfo can throw on some sandboxes (no uid mapping); ignore.
+    }
     const tags = {
         "claude_code.session_id": sessionId,
+        "gen_ai.conversation.id": sessionId,
         ...(sessionName !== undefined && { "claude_code.session_name": sessionName }),
         ...(version !== undefined && { "claude_code.version": version }),
         ...(repoName !== undefined && { "vcs.repository.name": repoName }),
         ...(repoUrl !== undefined && { "vcs.repository.url": repoUrl }),
         ...(branch !== undefined && { "vcs.ref.head.name": branch }),
         ...(revision !== undefined && { "vcs.ref.head.revision": revision }),
+        "service.name": "claude-code-ai-observability",
+        "service.version": PLUGIN_VERSION,
         "host.name": os.hostname(),
+        "host.arch": os.arch(),
         "os.type": os.platform(),
+        "os.version": os.release(),
+        ...(username !== undefined && { "user.username": username }),
+        ...(userId !== undefined && { "user.id": userId }),
         "process.cwd": effectiveCwd,
         "process.pid": process.pid,
+        "process.runtime.name": "node",
+        "process.runtime.version": process.version,
+        "process.executable.path": process.execPath,
     };
     return tags;
 }

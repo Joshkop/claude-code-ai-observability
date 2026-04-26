@@ -15,6 +15,7 @@ export function createSubagentSpan(sentry, event, options = {}) {
     const { subagentType, prompt, description } = readTaskInput(event.tool_input);
     const name = `invoke_agent ${subagentType ?? "subagent"}`;
     const attributes = {
+        "gen_ai.provider.name": "anthropic",
         "gen_ai.system": "anthropic",
         "gen_ai.operation.name": "invoke_agent",
     };
@@ -24,6 +25,8 @@ export function createSubagentSpan(sentry, event, options = {}) {
         attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
     if (prompt)
         attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
+    if (event.tool_use_id)
+        attributes["gen_ai.tool.call.id"] = event.tool_use_id;
     const startSpan = sentry.startInactiveSpan;
     if (typeof startSpan !== "function")
         return null;

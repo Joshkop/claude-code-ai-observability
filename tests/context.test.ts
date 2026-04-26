@@ -66,4 +66,38 @@ describe("detectContext (smoke)", () => {
     const tags = await detectContext("s1");
     expect(tags["claude_code.version"]).toBe("1.2.3");
   });
+
+  it("emits gen_ai.conversation.id matching the session id", async () => {
+    const tags = await detectContext("conv-42");
+    expect(tags["gen_ai.conversation.id"]).toBe("conv-42");
+  });
+
+  it("emits service.name and service.version", async () => {
+    const tags = await detectContext("s1");
+    expect(tags["service.name"]).toBe("claude-code-ai-observability");
+    expect(typeof tags["service.version"]).toBe("string");
+    expect(tags["service.version"]!.length).toBeGreaterThan(0);
+  });
+
+  it("emits process.runtime.name=node and process.runtime.version", async () => {
+    const tags = await detectContext("s1");
+    expect(tags["process.runtime.name"]).toBe("node");
+    expect(tags["process.runtime.version"]).toBe(process.version);
+  });
+
+  it("emits host.arch and os.version", async () => {
+    const tags = await detectContext("s1");
+    expect(typeof tags["host.arch"]).toBe("string");
+    expect(typeof tags["os.version"]).toBe("string");
+  });
+
+  it("emits user.username when os.userInfo is available", async () => {
+    const tags = await detectContext("s1");
+    // user.username is best-effort; in unprivileged sandboxes os.userInfo may
+    // throw and the tag is omitted. When present, it should be a non-empty string.
+    if (tags["user.username"] !== undefined) {
+      expect(typeof tags["user.username"]).toBe("string");
+      expect(tags["user.username"]!.length).toBeGreaterThan(0);
+    }
+  });
 });

@@ -102,27 +102,54 @@ All env vars take precedence over the config file.
 
 ## Auto-tag reference
 
-These attributes are applied to every per-turn root transaction and inherited by its child tool spans. Filter or group by `claude_code.session_id` in Sentry to aggregate across all turns of a session.
+These attributes are applied to every per-turn root transaction and inherited by its child tool spans. Filter or group by `gen_ai.conversation.id` (or `claude_code.session_id`) in Sentry to aggregate across all turns of a session; filter by `user.username`, `service.version`, `vcs.ref.head.name`, or `host.name` to slice traces by developer, plugin version, branch, or machine.
 
 | Attribute | Source |
 |---|---|
 | `claude_code.session_id` | Hook event `session_id` field |
 | `claude_code.session_name` | `CLAUDE_SESSION_NAME` env → tmux `display-message -p "#S"` → screen `$STY` |
 | `claude_code.version` | `CLAUDE_CODE_VERSION` env → `claude --version` |
+| `gen_ai.conversation.id` | Same as `claude_code.session_id` — OTel-spec name Sentry's AI Agents list groups by |
 | `vcs.repository.name` | Derived from `git remote get-url origin` |
 | `vcs.repository.url` | `git remote get-url origin` (SSH URLs normalised to HTTPS) |
 | `vcs.ref.head.name` | `git rev-parse --abbrev-ref HEAD` |
 | `vcs.ref.head.revision` | `git rev-parse --short=12 HEAD` |
+| `service.name` | Hard-coded `claude-code-ai-observability` |
+| `service.version` | Plugin version from `.claude-plugin/plugin.json` |
 | `host.name` | `os.hostname()` |
+| `host.arch` | `os.arch()` |
 | `os.type` | `os.platform()` |
+| `os.version` | `os.release()` |
+| `user.username` | `os.userInfo().username` (also set on Sentry's first-class user scope via `Sentry.setUser`) |
+| `user.id` | `os.userInfo().uid` (numeric uid, stringified) |
 | `process.cwd` | `process.cwd()` |
 | `process.pid` | `process.pid` |
+| `process.runtime.name` | Hard-coded `node` |
+| `process.runtime.version` | `process.version` |
+| `process.executable.path` | `process.execPath` |
 
-All detections are non-blocking and cached once per session. Missing tools (git, tmux) degrade gracefully — the attribute is simply omitted.
+All detections are non-blocking and cached once per session. Missing tools (git, tmux) and sandboxes without uid mappings degrade gracefully — the attribute is simply omitted.
+
+### gen_ai span attributes
+
+Per-turn `gen_ai.invoke_agent` transactions also carry these Sentry-recognized AI attributes:
+
+| Attribute | Notes |
+|---|---|
+| `gen_ai.operation.name` | `invoke_agent` on turn spans, `execute_tool` on tool spans |
+| `gen_ai.provider.name` | `anthropic` (Sentry's preferred attribute; `gen_ai.system` is dual-emitted for older SDKs) |
+| `gen_ai.agent.name` | `claude-code` on turn spans; `subagent_type` on subagent spans |
+| `gen_ai.request.model` | Model from the `SessionStart` hook |
+| `gen_ai.response.model` | Model from the assistant turn in the transcript |
+| `gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens` | Per-turn from the transcript |
+| `gen_ai.usage.input_tokens.cached` | Anthropic cache-read tokens (Sentry's `GEN_AI_USAGE_INPUT_TOKENS_CACHED`) |
+| `gen_ai.usage.input_tokens.cache_write` | Anthropic cache-write tokens (Sentry's `GEN_AI_USAGE_INPUT_TOKENS_CACHE_WRITE`) |
+| `conversation.cost_estimate_usd` | Per-turn USD cost rollup (Sentry manual-monitoring example pattern) |
+| `gen_ai.tool.name` / `gen_ai.tool.type` / `gen_ai.tool.call.id` | On `gen_ai.execute_tool` spans; `tool.call.id` is Claude Code's `tool_use_id` |
 
 ## Cost calculation
 
-Per-turn USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku) and attached to each turn transaction as `gen_ai.usage.cost.*`. Session totals are aggregated in Sentry by grouping on `claude_code.session_id`. The three input buckets are priced separately:
+Per-turn USD cost is calculated from the transcript token counts using a built-in price table (Opus, Sonnet, Haiku) and attached to each turn transaction as `conversation.cost_estimate_usd` — a single rollup attribute that matches Sentry's manual-monitoring example. Session totals are aggregated in Sentry by grouping on `gen_ai.conversation.id` (or the equivalent `claude_code.session_id`). The three input buckets are priced separately:
 - raw input tokens at the `input` rate,
 - `cache_creation_input_tokens` at the `cacheCreation` rate,
 - `cache_read_input_tokens` at the `cacheRead` rate.

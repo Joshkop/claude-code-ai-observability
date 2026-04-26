@@ -127,13 +127,23 @@ export interface AutoTags {
   "claude_code.session_id"?: string;
   "claude_code.session_name"?: string;
   "claude_code.version"?: string;
+  "gen_ai.conversation.id"?: string;
   "vcs.repository.name"?: string;
   "vcs.repository.url"?: string;
   "vcs.ref.head.name"?: string;
   "vcs.ref.head.revision"?: string;
+  "service.name"?: string;
+  "service.version"?: string;
   "host.name"?: string;
+  "host.arch"?: string;
   "os.type"?: string;
+  "os.version"?: string;
+  "user.username"?: string;
+  "user.id"?: string;
   "process.cwd"?: string;
   "process.pid"?: number;
+  "process.runtime.name"?: string;
+  "process.runtime.version"?: string;
+  "process.executable.path"?: string;
 }
 

@@ -209,7 +209,15 @@ export function startServer(
       record.toolCount += 1;
       return;
     }
-    const span = createToolSpan(sentry, parent, event.tool_name, event.tool_input, config);
+    const span = createToolSpan(
+      sentry,
+      parent,
+      event.tool_name,
+      event.tool_input,
+      config,
+      undefined,
+      event.tool_use_id,
+    );
     const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount}`;
     record.pendingTools.set(key, span);
     record.toolCount += 1;
