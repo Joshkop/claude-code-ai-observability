@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.6] - 2026-04-26
+
+### Changed
+
+- **Setup skill (`set up Sentry monitoring`) now self-cleans the legacy upstream install.** Before prompting for a DSN, the skill detects leftovers from `sergical/claude-code-sentry-monitor` (installed-plugins manifest entry, a process listening on port 19876, and `~/.cache/claude-code-sentry-monitor/`), asks once, and on confirmation kills the upstream collector and wipes its cache. It also evicts a stale `claude-code-ai-observability` collector PID so the new install starts fresh. PowerShell equivalents are included for native Windows.
+- **Setup skill now runs `scripts/doctor.sh` automatically** at the end (instead of just suggesting it) and reports `OK` / `NOT OK: collector not running` / `NOT OK: no DSN configured` with a context-appropriate next step. On native Windows the skill falls back to an inline `/health` probe via `node -e fetch(...)`.
+- **README migration guide collapsed to four slash commands + one skill invocation.** The previous five-step bash-and-slash mix is replaced by `/plugin marketplace remove sergical` → `/plugin uninstall claude-code-sentry-monitor` → `/plugin marketplace add Joshkop/claude-code-ai-observability` → `/plugin install claude-code-ai-observability` → say "set up Sentry monitoring". The skill handles the rest. A "Windows" subsection documents the native-Windows tradeoff (runtime works; bundled bash doctor needs WSL/Git Bash).
+
+### Notes
+
+- No runtime / collector / hook code changed — `scripts/*.js` is identical to v0.1.5. Version bump is a UX-only release.
+
 ## [0.1.5] - 2026-04-26
 
 ### Fixed
