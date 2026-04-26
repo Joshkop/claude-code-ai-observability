@@ -6,3 +6,5 @@ scripts/package-lock.json
 .omc/logs/
 .omc/research/
 .omc/plans/
+.omc/project-memory.json
+.omc/notepad.md
