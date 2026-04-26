@@ -34,6 +34,9 @@ type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 
 interface SessionRecord {
   currentTurnSpan: Span | null;
+  /** Unix-seconds start time of the current turn — used as the gen_ai.chat
+   *  child span's startTime so it covers the same window as the parent. */
+  currentTurnStart: number | null;
   pendingTools: Map<string, Span>;
   toolCount: number;
   transcriptPath?: string;
@@ -114,6 +117,7 @@ export function startServer(
     };
     sessions.set(event.session_id, {
       currentTurnSpan: null,
+      currentTurnStart: null,
       pendingTools: new Map(),
       toolCount: 0,
       transcriptPath: event.transcript_path,
@@ -163,16 +167,20 @@ export function startServer(
       priceTable,
     );
     closeTurnSpan(
+      sentry,
       record.currentTurnSpan,
       {
         tokens,
         responseModel: record.responseModel ?? record.model,
         response: tokens.response,
         cost,
+        turnStartTime: record.currentTurnStart ?? undefined,
+        sessionId: record.autoTags["claude_code.session_id"],
       },
       config,
     );
     record.currentTurnSpan = null;
+    record.currentTurnStart = null;
   };
 
   const handleUserPrompt = (event: UserPromptSubmitEvent): void => {
@@ -181,6 +189,7 @@ export function startServer(
     closeCurrentTurn(record);
     record.turnIndex += 1;
     const prompt = event.prompt ?? event.message ?? null;
+    record.currentTurnStart = Date.now() / 1000;
     record.currentTurnSpan = openTurnTransaction(
       sentry,
       event.session_id,

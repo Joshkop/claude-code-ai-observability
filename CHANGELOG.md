@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.5] - 2026-04-26
+
+### Fixed
+
+- **"Tokens Used" widget on Sentry's AI Agents dashboard now populates.** Each per-turn `gen_ai.invoke_agent` transaction now contains a synthetic `gen_ai.chat` child span that carries the per-turn token aggregate. Sentry's dashboard widget filters specifically by `op=gen_ai.chat`; placing token attributes on the `invoke_agent` root alone made the per-span detail view show the tokens (and made Sentry compute server-side `gen_ai.cost.*` from them) but left the dashboard's per-conversation rollup blank. The chat child carries `gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens` / `input_tokens.cached` / `input_tokens.cache_write`, plus `gen_ai.conversation.id`, `gen_ai.request.model`, and `gen_ai.response.model` for filter parity. The `invoke_agent` root keeps `conversation.cost_estimate_usd` as the cost rollup; tokens are no longer duplicated on the root (they live on the chat child only).
+
+### Changed
+
+- **`closeTurnSpan` signature.** Now requires the Sentry namespace as its first argument and accepts `turnStartTime` + `sessionId` on `CloseTurnInput` so the chat child can span the same window as its parent and inherit the conversation id. Internal API; only the collector calls it.
+- **`SessionRecord.currentTurnStart`.** New field tracking the Unix-seconds start time of the active turn. Set in `handleUserPrompt`, consumed by `closeTurnSpan`, cleared on close.
+
 ## [0.1.4] - 2026-04-26
 
 ### Changed

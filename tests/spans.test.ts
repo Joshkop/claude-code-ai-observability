@@ -150,28 +150,48 @@ describe("closeTurnSpan attribute contract", () => {
     };
   }
 
-  it("sets input/output/total/cached/cache_write token attributes", () => {
+  it("emits a gen_ai.chat child span carrying token attributes (Sentry 'Tokens Used' widget requires op=gen_ai.chat)", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    sentry.startCalls.length = 0; // ignore the invoke_agent open call
 
-    closeTurnSpan(turn as never, { tokens: makeTokens() }, baseConfig);
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens(), sessionId: "sess-1" }, baseConfig);
 
-    expect(turnSpan.attrs["gen_ai.usage.input_tokens"]).toBe(150);
-    expect(turnSpan.attrs["gen_ai.usage.output_tokens"]).toBe(60);
-    expect(turnSpan.attrs["gen_ai.usage.total_tokens"]).toBe(210);
-    expect(turnSpan.attrs["gen_ai.usage.input_tokens.cached"]).toBe(30);
-    expect(turnSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(20);
+    // closeTurnSpan should have started exactly one chat child.
+    expect(sentry.startCalls).toHaveLength(1);
+    expect(sentry.startCalls[0].op).toBe("gen_ai.chat");
+
+    const chatSpan = sentry.spans[sentry.spans.length - 1];
+    expect(chatSpan.attrs["gen_ai.operation.name"]).toBe("chat");
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens"]).toBe(150);
+    expect(chatSpan.attrs["gen_ai.usage.output_tokens"]).toBe(60);
+    expect(chatSpan.attrs["gen_ai.usage.total_tokens"]).toBe(210);
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens.cached"]).toBe(30);
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(20);
+    expect(chatSpan.attrs["gen_ai.conversation.id"]).toBe("sess-1");
   });
 
-  it("does not emit cache_write when cacheCreationTokens is zero", () => {
+  it("does NOT put token attributes on the invoke_agent root (they live on the chat child)", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
-    closeTurnSpan(turn as never, { tokens: makeTokens({ cacheCreationTokens: 0 }) }, baseConfig);
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens() }, baseConfig);
 
-    expect(turnSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBeUndefined();
+    expect(turnSpan.attrs["gen_ai.usage.input_tokens"]).toBeUndefined();
+    expect(turnSpan.attrs["gen_ai.usage.output_tokens"]).toBeUndefined();
+    expect(turnSpan.attrs["gen_ai.usage.total_tokens"]).toBeUndefined();
+  });
+
+  it("does not emit cache_write on the chat child when cacheCreationTokens is zero", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
+    sentry.startCalls.length = 0;
+
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens({ cacheCreationTokens: 0 }) }, baseConfig);
+
+    const chatSpan = sentry.spans[sentry.spans.length - 1];
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens.cache_write"]).toBeUndefined();
   });
 
   it("sets gen_ai.response.model from tokens.model", () => {
@@ -179,7 +199,7 @@ describe("closeTurnSpan attribute contract", () => {
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
-    closeTurnSpan(turn as never, { tokens: makeTokens({ model: "claude-opus-4-7" }) }, baseConfig);
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens({ model: "claude-opus-4-7" }) }, baseConfig);
 
     expect(turnSpan.attrs["gen_ai.response.model"]).toBe("claude-opus-4-7");
   });
@@ -189,7 +209,7 @@ describe("closeTurnSpan attribute contract", () => {
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
-    closeTurnSpan(turn as never, { tokens: makeTokens({ model: null }), responseModel: "claude-haiku-4-5-20251001" }, baseConfig);
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens({ model: null }), responseModel: "claude-haiku-4-5-20251001" }, baseConfig);
 
     expect(turnSpan.attrs["gen_ai.response.model"]).toBe("claude-haiku-4-5-20251001");
   });
@@ -200,6 +220,7 @@ describe("closeTurnSpan attribute contract", () => {
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(
+      sentry as never,
       turn as never,
       {
         tokens: makeTokens(),
@@ -217,6 +238,7 @@ describe("closeTurnSpan attribute contract", () => {
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(
+      sentry as never,
       turn as never,
       {
         tokens: makeTokens(),
@@ -235,7 +257,7 @@ describe("closeTurnSpan attribute contract", () => {
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
 
-    closeTurnSpan(turn as never, { tokens: makeTokens() }, baseConfig);
+    closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens() }, baseConfig);
 
     expect(turnSpan.attrs["conversation.cost_estimate_usd"]).toBeUndefined();
   });
