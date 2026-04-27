@@ -29,7 +29,8 @@ export function isSubagentInvocation(event: HookEvent | undefined | null): boole
   if (event.hook_event_name !== "PreToolUse" && event.hook_event_name !== "PostToolUse") {
     return false;
   }
-  return (event as PreToolUseEvent | PostToolUseEvent).tool_name === "Task";
+  const toolName = (event as PreToolUseEvent | PostToolUseEvent).tool_name;
+  return toolName === "Task" || toolName === "Agent";
 }
 
 export function createSubagentSpan(

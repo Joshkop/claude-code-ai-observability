@@ -78,6 +78,10 @@ post_hook "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"${SESSION_
 post_hook "{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"${SESSION_ID}\",\"tool_name\":\"Task\",\"tool_use_id\":\"tu-2\",\"tool_input\":{\"subagent_type\":\"explore\",\"prompt\":\"explore the repo\"}}"
 post_hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"${SESSION_ID}\",\"tool_name\":\"Task\",\"tool_use_id\":\"tu-2\",\"tool_response\":\"done\",\"tool_error\":false}"
 
+# Turn 3 — with an Agent (subagent) invocation (newer harness tool name)
+post_hook "{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"${SESSION_ID}\",\"tool_name\":\"Agent\",\"tool_use_id\":\"tu-3\",\"tool_input\":{\"subagent_type\":\"oh-my-claudecode:executor\",\"prompt\":\"do executor work\"}}"
+post_hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"${SESSION_ID}\",\"tool_name\":\"Agent\",\"tool_use_id\":\"tu-3\",\"tool_response\":\"done\",\"tool_error\":false}"
+
 # SessionEnd
 post_hook "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"${SESSION_ID}\",\"transcript_path\":\"${TRANSCRIPT_PATH}\"}"
 
