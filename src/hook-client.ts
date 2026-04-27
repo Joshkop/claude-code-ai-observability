@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { HookEvent } from "./types.js";
+import { detectClientContext } from "./client-context.js";
 import {
   CACHE_DIR,
   PID_FILE,
@@ -47,10 +48,17 @@ export async function probeHealth(port: number, timeoutMs = 500): Promise<Collec
 
 export async function sendHookEvent(event: HookEvent, port: number): Promise<void> {
   try {
+    // Enrich the event with hook-client-side context so the long-lived
+    // collector — whose env was frozen at *its* spawn time — uses the
+    // user's *live* tmux/screen session name, parent linkage, etc.
+    const enriched: HookEvent = {
+      ...event,
+      _aiobs: { context: detectClientContext() },
+    };
     await fetch(`${baseUrl(port)}/hook`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(event),
+      body: JSON.stringify(enriched),
       signal: AbortSignal.timeout(500),
     });
   } catch {

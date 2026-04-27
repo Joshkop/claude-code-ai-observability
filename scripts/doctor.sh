@@ -1,10 +1,16 @@
 #!/bin/bash
-# Diagnostic helper for claude-code-ai-observability plugin
-# Probes collector, PID file, DSN config, and logs to help debug setup issues
+# Diagnostic helper for claude-code-ai-observability plugin.
+# Forwards to scripts/doctor.mjs (cross-platform Node implementation) so the
+# bash and PowerShell paths share one source of truth. The legacy bash logic
+# previously inlined here was removed in v0.1.7.
 
 set -euo pipefail
 
-# Colors for output (disabled for now, per constraints)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec node "$SCRIPT_DIR/doctor.mjs" "$@"
+# Below variables retained for backward-compat: external scripts/CI may grep
+# them. They have no functional effect since the exec above replaces this
+# process; kept solely to avoid silently breaking downstream tooling.
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE_DIR="${HOME}/.cache/claude-code-ai-observability"
 PORT="${SENTRY_COLLECTOR_PORT:-19877}"

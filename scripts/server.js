@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { reportPluginError } from "./sentry-errors.js";
 import { closeTurnSpan, createToolSpan, openTurnTransaction, } from "./spans.js";
 import { extractPerTurnTokens } from "./transcript.js";
 import { detectContext } from "./context.js";
@@ -15,6 +16,35 @@ const STALE_SESSION_IDLE_MS = 30 * 60_000;
  * Pure predicate used by the reaper timer.
  * Exported so it can be unit-tested without running a real timer.
  */
+/**
+ * Merge hook-client-supplied dynamic context onto the session's autoTags.
+ * Only writes fields that are non-empty so missing context (e.g. no tmux)
+ * doesn't blank a previously-known value.
+ */
+export function applyClientContext(tags, ctx) {
+    if (!ctx)
+        return;
+    if (ctx.session_name)
+        tags["claude_code.session_name"] = ctx.session_name;
+    if (ctx.parent_session_id)
+        tags["claude_code.parent_session_id"] = ctx.parent_session_id;
+    if (ctx.parent_agent_name)
+        tags["claude_code.parent_agent_name"] = ctx.parent_agent_name;
+    if (ctx.tmux_window)
+        tags["claude_code.tmux.window"] = ctx.tmux_window;
+    if (ctx.tmux_pane)
+        tags["claude_code.tmux.pane"] = ctx.tmux_pane;
+    if (ctx.terminal_program)
+        tags["claude_code.terminal.program"] = ctx.terminal_program;
+    if (ctx.terminal_session_id)
+        tags["claude_code.terminal.session_id"] = ctx.terminal_session_id;
+    if (ctx.username)
+        tags["user.username"] = ctx.username;
+    if (ctx.user_id)
+        tags["user.id"] = ctx.user_id;
+    if (ctx.cwd)
+        tags["process.cwd"] = ctx.cwd;
+}
 export function isStaleSession(record, now, idleMs = STALE_SESSION_IDLE_MS) {
     return now - record.lastEventAt > idleMs;
 }
@@ -66,11 +96,20 @@ export function startServer(sentry, config, baseAutoTags) {
             ...detected,
             "claude_code.session_id": event.session_id,
         };
+        // The collector inherits the env of *its* spawning process. On a long-
+        // lived collector that env is stale (e.g. a tmux session that died days
+        // ago) — every later session_id then inherits the same wrong session
+        // name. The hook-client sends live values via event._aiobs.context;
+        // those win.
+        applyClientContext(autoTags, event._aiobs?.context);
         sessions.set(event.session_id, {
             currentTurnSpan: null,
             currentTurnStart: null,
             pendingTools: new Map(),
             toolCount: 0,
+            turnToolCount: 0,
+            turnSubagentCount: 0,
+            turnTools: new Set(),
             transcriptPath: event.transcript_path,
             model: event.model,
             turnIndex: -1,
@@ -83,9 +122,9 @@ export function startServer(sentry, config, baseAutoTags) {
             closeCurrentTurn(record);
         }
         catch { /* ignore */ }
-        for (const [, span] of record.pendingTools) {
+        for (const [, pending] of record.pendingTools) {
             try {
-                span.end();
+                pending.span.end();
             }
             catch { /* ignore */ }
         }
@@ -128,9 +167,15 @@ export function startServer(sentry, config, baseAutoTags) {
             cost,
             turnStartTime: record.currentTurnStart ?? undefined,
             sessionId: record.autoTags["claude_code.session_id"],
+            toolCount: record.turnToolCount,
+            subagentCount: record.turnSubagentCount,
+            toolsUsed: Array.from(record.turnTools),
         }, config);
         record.currentTurnSpan = null;
         record.currentTurnStart = null;
+        record.turnToolCount = 0;
+        record.turnSubagentCount = 0;
+        record.turnTools.clear();
     };
     const handleUserPrompt = (event) => {
         const record = sessions.get(event.session_id);
@@ -156,12 +201,17 @@ export function startServer(sentry, config, baseAutoTags) {
             maxAttrLen: config.maxAttributeLength,
         })) {
             record.toolCount += 1;
+            record.turnSubagentCount += 1;
+            record.turnTools.add("Task");
             return;
         }
+        const startedAt = Date.now();
         const span = createToolSpan(sentry, parent, event.tool_name, event.tool_input, config, undefined, event.tool_use_id);
         const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount}`;
-        record.pendingTools.set(key, span);
+        record.pendingTools.set(key, { span, startedAt, toolName: event.tool_name });
         record.toolCount += 1;
+        record.turnToolCount += 1;
+        record.turnTools.add(event.tool_name);
     };
     const handlePostTool = (event) => {
         const record = sessions.get(event.session_id);
@@ -183,9 +233,10 @@ export function startServer(sentry, config, baseAutoTags) {
             return;
         }
         const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount - 1}`;
-        const span = record.pendingTools.get(key);
-        if (!span)
+        const pending = record.pendingTools.get(key);
+        if (!pending)
             return;
+        const { span, startedAt } = pending;
         if (config.recordOutputs && event.tool_response !== undefined) {
             try {
                 const sanitized = serialize(event.tool_response, config.maxAttributeLength);
@@ -196,6 +247,10 @@ export function startServer(sentry, config, baseAutoTags) {
                 // ignore
             }
         }
+        try {
+            span.setAttribute("gen_ai.tool.duration_ms", Date.now() - startedAt);
+        }
+        catch { /* ignore */ }
         if (event.tool_error) {
             applyToolError(span, event);
             captureBreadcrumb(sentry, {
@@ -217,9 +272,9 @@ export function startServer(sentry, config, baseAutoTags) {
             record.transcriptPath = event.transcript_path;
         }
         closeCurrentTurn(record);
-        for (const [, span] of record.pendingTools) {
+        for (const [, pending] of record.pendingTools) {
             try {
-                span.end();
+                pending.span.end();
             }
             catch { /* ignore */ }
         }
@@ -235,8 +290,12 @@ export function startServer(sentry, config, baseAutoTags) {
         if (!sid)
             return;
         const r = sessions.get(sid);
-        if (r)
-            r.lastEventAt = Date.now();
+        if (!r)
+            return;
+        r.lastEventAt = Date.now();
+        // Refresh dynamic tags from every event — tmux sessions can be renamed
+        // and parent linkage may only become known after the first hook fires.
+        applyClientContext(r.autoTags, event._aiobs?.context);
     };
     async function handleEvent(event) {
         touchSession(event);
@@ -301,6 +360,12 @@ export function startServer(sentry, config, baseAutoTags) {
                     send(res, 200, "{}", "application/json");
                 }
                 catch (err) {
+                    // Surface dispatch failures into the user's own Sentry project so
+                    // "no traces showing up" is debuggable without local log files.
+                    reportPluginError(sentry, err, {
+                        hook_event_name: event.hook_event_name,
+                        session_id: event.session_id,
+                    });
                     send(res, 500, JSON.stringify({ error: err.message ?? "unknown" }), "application/json");
                 }
             })
@@ -355,9 +420,9 @@ export function startServer(sentry, config, baseAutoTags) {
         for (const [, record] of sessions) {
             try {
                 closeCurrentTurn(record);
-                for (const [, span] of record.pendingTools) {
+                for (const [, pending] of record.pendingTools) {
                     try {
-                        span.end();
+                        pending.span.end();
                     }
                     catch { /* ignore */ }
                 }

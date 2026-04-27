@@ -3,6 +3,7 @@ import { readFileSync, existsSync, mkdirSync, openSync, closeSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { detectClientContext } from "./client-context.js";
 import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 function getPort() {
@@ -40,10 +41,17 @@ export async function probeHealth(port, timeoutMs = 500) {
 }
 export async function sendHookEvent(event, port) {
     try {
+        // Enrich the event with hook-client-side context so the long-lived
+        // collector — whose env was frozen at *its* spawn time — uses the
+        // user's *live* tmux/screen session name, parent linkage, etc.
+        const enriched = {
+            ...event,
+            _aiobs: { context: detectClientContext() },
+        };
         await fetch(`${baseUrl(port)}/hook`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(event),
+            body: JSON.stringify(enriched),
             signal: AbortSignal.timeout(500),
         });
     }
