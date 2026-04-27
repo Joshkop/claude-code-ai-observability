@@ -66,21 +66,46 @@ export interface ResolvedPluginConfig
   prices?: PriceTable;
 }
 
-export interface SessionStartEvent {
+/**
+ * Dynamic context captured in the hook-client process. Sent on every hook
+ * event so the long-lived collector can override its own (frozen-at-spawn)
+ * env-derived attributes. See src/client-context.ts.
+ */
+export interface AiobsClientContext {
+  session_name?: string;
+  parent_session_id?: string;
+  parent_agent_name?: string;
+  tmux_window?: string;
+  tmux_pane?: string;
+  terminal_program?: string;
+  terminal_session_id?: string;
+  username?: string;
+  user_id?: string;
+  cwd?: string;
+  ppid?: number;
+  captured_at_ms?: number;
+}
+
+/** Wrapper field added by the hook-client to every outbound hook event. */
+export interface AiobsEnvelope {
+  _aiobs?: { context?: AiobsClientContext };
+}
+
+export interface SessionStartEvent extends AiobsEnvelope {
   hook_event_name: "SessionStart";
   session_id: string;
   model?: string;
   transcript_path?: string;
 }
 
-export interface UserPromptSubmitEvent {
+export interface UserPromptSubmitEvent extends AiobsEnvelope {
   hook_event_name: "UserPromptSubmit";
   session_id: string;
   prompt?: string;
   message?: string;
 }
 
-export interface PreToolUseEvent {
+export interface PreToolUseEvent extends AiobsEnvelope {
   hook_event_name: "PreToolUse";
   session_id: string;
   tool_name: string;
@@ -88,7 +113,7 @@ export interface PreToolUseEvent {
   tool_input?: unknown;
 }
 
-export interface PostToolUseEvent {
+export interface PostToolUseEvent extends AiobsEnvelope {
   hook_event_name: "PostToolUse";
   session_id: string;
   tool_name: string;
@@ -97,19 +122,19 @@ export interface PostToolUseEvent {
   tool_error?: boolean;
 }
 
-export interface SessionEndEvent {
+export interface SessionEndEvent extends AiobsEnvelope {
   hook_event_name: "SessionEnd";
   session_id: string;
   transcript_path?: string;
 }
 
-export interface PreCompactEvent {
+export interface PreCompactEvent extends AiobsEnvelope {
   hook_event_name: "PreCompact";
   session_id: string;
   transcript_path?: string;
 }
 
-export interface StopEvent {
+export interface StopEvent extends AiobsEnvelope {
   hook_event_name: "Stop";
   session_id: string;
 }
@@ -127,6 +152,12 @@ export interface AutoTags {
   "claude_code.session_id"?: string;
   "claude_code.session_name"?: string;
   "claude_code.version"?: string;
+  "claude_code.parent_session_id"?: string;
+  "claude_code.parent_agent_name"?: string;
+  "claude_code.tmux.window"?: string;
+  "claude_code.tmux.pane"?: string;
+  "claude_code.terminal.program"?: string;
+  "claude_code.terminal.session_id"?: string;
   "gen_ai.conversation.id"?: string;
   "vcs.repository.name"?: string;
   "vcs.repository.url"?: string;

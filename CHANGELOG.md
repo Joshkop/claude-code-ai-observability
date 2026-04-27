@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.7] - 2026-04-27
+
+### Fixed
+
+- **`claude_code.session_name` is now per-session, not collector-wide.** Previously every span shared the tmux session name captured when the *collector* first spawned — so traces from a session started 2 days later still showed a long-deleted tmux name. Cause: the collector is a long-lived process; `process.env.TMUX_PANE` is frozen at its spawn time. Fix: the hook-client (which forks per-event in the user's *live* shell) now captures session_name + tmux/pane/window via a new `_aiobs.context` envelope on every hook event, and the collector treats those values as authoritative. Sets `claude_code.tmux.window` and `claude_code.tmux.pane` for the same reason.
+- **Subagent traces can now be correlated to a parent session** via `claude_code.parent_session_id` and `claude_code.parent_agent_name`, populated when the spawning orchestrator (e.g. an `omc team` worker) sets `CLAUDE_PARENT_SESSION_ID` / `CLAUDE_PARENT_AGENT_NAME` in the child process env. Filter or group by these in Sentry to see all traces a single Task / orchestrator produced.
+
+### Added
+
+- **Plugin errors now appear in your own Sentry project.** Uncaught exceptions in the collector and dispatch failures in the hook handler are forwarded via `Sentry.captureException` with tag `claude_code.plugin_error: true`, so "no traces showing up" is debuggable directly in the Sentry **Issues** view of the same project the DSN points at — no log files required. Implemented in `src/sentry-errors.ts` (`reportPluginError`, `reportPluginMessage`, `installGlobalHandlers`).
+- **Per-turn rollups on `gen_ai.invoke_agent` spans** for "which turns are tool-heavy / spawned subagents" queries: `claude_code.turn.tool_count`, `claude_code.turn.subagent_count`, `claude_code.turn.tools_used` (comma-joined names).
+- **Per-tool duration**: `gen_ai.tool.duration_ms` on every `gen_ai.execute_tool` span (Pre→Post wall-clock).
+- **Cross-platform doctor**: `scripts/doctor.mjs` (Node, runs natively on Windows PowerShell, macOS, Linux, WSL). The legacy `scripts/doctor.sh` is now a thin `exec node` wrapper so existing `bash scripts/doctor.sh` invocations keep working.
+- **Two slash commands** shipped under `commands/`:
+  - `/aiobs-test` — runs the doctor + smoke test, with a triage table mapping common failures to fixes.
+  - `/aiobs-setup` — one-line alias that invokes the existing setup wizard skill, for users who prefer slash-command discoverability.
+
+### Changed
+
+- **`SessionRecord` shape** in the collector: `pendingTools` map values are now `{ span, startedAt, toolName }` (was `Span`), enabling the new per-tool duration attribute. Internal API; only `src/server.ts` consumes it.
+- **`HookEvent` types** carry an optional `_aiobs?: { context?: AiobsClientContext }` envelope. Old collectors (pre-0.1.7) safely ignore the unknown field; old hook-clients sending no envelope continue to work — the collector falls back to its own `detectContext` snapshot.
+
 ## [0.1.6] - 2026-04-26
 
 ### Changed

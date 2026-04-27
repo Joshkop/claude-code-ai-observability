@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import { loadConfig, resolveDefaults } from "./config.js";
 import { startServer } from "./server.js";
+import { installGlobalHandlers } from "./sentry-errors.js";
 const require = createRequire(import.meta.url);
 function loadSentry() {
     return require("@sentry/node");
@@ -41,6 +42,9 @@ async function startCollector(config) {
     catch {
         // os.userInfo can throw on sandboxes with no uid mapping; skip silently.
     }
+    // Route collector-side crashes into the same Sentry project — otherwise
+    // users have no idea why traces stopped appearing.
+    installGlobalHandlers(Sentry);
     startServer(Sentry, config, {});
 }
 async function main() {

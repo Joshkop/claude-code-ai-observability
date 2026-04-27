@@ -61,6 +61,12 @@ export interface CloseTurnInput {
   turnStartTime?: number;
   /** Session id, replicated onto the chat child for filter parity. */
   sessionId?: string;
+  /** Number of regular tools invoked during this turn. */
+  toolCount?: number;
+  /** Number of subagent (Task tool) invocations during this turn. */
+  subagentCount?: number;
+  /** De-duplicated list of tool names used in this turn. */
+  toolsUsed?: string[];
 }
 
 export function closeTurnSpan(
@@ -70,7 +76,7 @@ export function closeTurnSpan(
   config: ResolvedPluginConfig,
   endTime?: number,
 ): void {
-  const { tokens, responseModel, cost, response, turnStartTime, sessionId } = input;
+  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed } = input;
   const respModel = responseModel ?? tokens.model ?? undefined;
 
   // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
@@ -124,6 +130,18 @@ export function closeTurnSpan(
     // additive — it lets you query plugin-priced totals when the model
     // isn't in Sentry's price table.
     turnSpan.setAttribute("conversation.cost_estimate_usd", cost.totalCost);
+  }
+  // Per-turn rollups: useful for "which turns are tool-heavy" / "which turns
+  // spawned subagents" without having to fan out into every child span.
+  if (typeof toolCount === "number") {
+    turnSpan.setAttribute("claude_code.turn.tool_count", toolCount);
+  }
+  if (typeof subagentCount === "number") {
+    turnSpan.setAttribute("claude_code.turn.subagent_count", subagentCount);
+  }
+  if (toolsUsed && toolsUsed.length) {
+    // Comma-joined string — Sentry attribute values must be primitive.
+    turnSpan.setAttribute("claude_code.turn.tools_used", toolsUsed.join(","));
   }
   turnSpan.end(endTime);
 }

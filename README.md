@@ -136,8 +136,10 @@ These attributes are applied to every per-turn root transaction and inherited by
 | Attribute | Source |
 |---|---|
 | `claude_code.session_id` | Hook event `session_id` field |
-| `claude_code.session_name` | `CLAUDE_SESSION_NAME` env → tmux `display-message -p "#S"` → screen `$STY` |
+| `claude_code.session_name` | `CLAUDE_SESSION_NAME` env → tmux `display-message -p "#S"` → screen `$STY`. Captured per-event in the hook-client (v0.1.7+) so the long-lived collector can't freeze a stale value. |
 | `claude_code.version` | `CLAUDE_CODE_VERSION` env → `claude --version` |
+| `claude_code.tmux.window` / `claude_code.tmux.pane` | tmux `display-message -p "#W"` / `"#D"` (when running inside tmux) |
+| `claude_code.parent_session_id` / `claude_code.parent_agent_name` | `CLAUDE_PARENT_SESSION_ID` / `CLAUDE_PARENT_AGENT_NAME` env. Set by orchestrators that spawn child Claude processes (e.g. `omc team`) so subagent traces can be filtered back to their parent. |
 | `gen_ai.conversation.id` | Same as `claude_code.session_id` — OTel-spec name Sentry's AI Agents list groups by |
 | `vcs.repository.name` | Derived from `git remote get-url origin` |
 | `vcs.repository.url` | `git remote get-url origin` (SSH URLs normalised to HTTPS) |
@@ -175,6 +177,8 @@ Per-turn `gen_ai.invoke_agent` transactions also carry these Sentry-recognized A
 | `gen_ai.usage.input_tokens.cache_write` | Anthropic cache-write tokens (Sentry's `GEN_AI_USAGE_INPUT_TOKENS_CACHE_WRITE`) |
 | `conversation.cost_estimate_usd` | Per-turn USD cost rollup (Sentry manual-monitoring example pattern) |
 | `gen_ai.tool.name` / `gen_ai.tool.type` / `gen_ai.tool.call.id` | On `gen_ai.execute_tool` spans; `tool.call.id` is Claude Code's `tool_use_id` |
+| `gen_ai.tool.duration_ms` | Pre→Post wall-clock per tool call (v0.1.7+) |
+| `claude_code.turn.tool_count` / `subagent_count` / `tools_used` | Per-turn rollups on `gen_ai.invoke_agent` spans (v0.1.7+) |
 
 ## Cost calculation
 
@@ -206,9 +210,28 @@ See the official [Sentry AI Agents monitoring docs](https://docs.sentry.io/produ
 
 The **"Tokens Used"** widget in the AI Agents view aggregates `gen_ai.usage.*` attributes across `gen_ai.invoke_agent` spans. This plugin emits all token attributes (`gen_ai.usage.input_tokens`, `output_tokens`, `total_tokens`, `input_tokens.cached`) on every per-turn `gen_ai.invoke_agent` transaction, and tags each one with `claude_code.session_id` so you can filter or group by session.
 
+## Slash commands
+
+Two commands ship with the plugin (under `commands/`):
+
+- `/aiobs-setup` — runs the bundled setup wizard (DSN prompt, config write, doctor verification). Equivalent to typing "set up Sentry monitoring".
+- `/aiobs-test` — runs the cross-platform doctor + the local smoke test (no Sentry quota consumed) and reports OK/FAIL with a triage table for common causes.
+
 ## Troubleshooting
 
-Run `bash scripts/doctor.sh` to diagnose common issues. It probes the collector, checks your DSN config, and reports recent errors.
+Run the cross-platform diagnostic — works on Windows PowerShell, macOS, Linux, and WSL:
+
+```
+node scripts/doctor.mjs
+```
+
+The legacy `bash scripts/doctor.sh` continues to work; it now just `exec`s the Node script.
+
+It probes the collector, checks your DSN config, and reports recent errors.
+
+### Plugin errors land in your Sentry project
+
+As of v0.1.7, the collector forwards uncaught exceptions and hook-dispatch failures to the same Sentry project your DSN points at, tagged `claude_code.plugin_error: true`. Filter the Issues view by that tag to debug "no traces showing up" without touching `~/.cache/.../*.err.log`.
 
 **No data in new sessions / stale collector squatting on port**
 
