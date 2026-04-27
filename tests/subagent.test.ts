@@ -69,6 +69,14 @@ describe("isSubagentInvocation", () => {
     expect(isSubagentInvocation(postToolUseEvent("Task"))).toBe(true);
   });
 
+  it("returns true for PreToolUse Agent", () => {
+    expect(isSubagentInvocation(preToolUseEvent("Agent"))).toBe(true);
+  });
+
+  it("returns true for PostToolUse Agent", () => {
+    expect(isSubagentInvocation(postToolUseEvent("Agent"))).toBe(true);
+  });
+
   it("returns false for PreToolUse Bash", () => {
     expect(isSubagentInvocation(preToolUseEvent("Bash"))).toBe(false);
   });

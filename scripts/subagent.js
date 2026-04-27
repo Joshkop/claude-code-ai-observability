@@ -8,7 +8,8 @@ export function isSubagentInvocation(event) {
     if (event.hook_event_name !== "PreToolUse" && event.hook_event_name !== "PostToolUse") {
         return false;
     }
-    return event.tool_name === "Task";
+    const toolName = event.tool_name;
+    return toolName === "Task" || toolName === "Agent";
 }
 export function createSubagentSpan(sentry, event, options = {}) {
     const maxAttrLen = options.maxAttrLen ?? 12000;
