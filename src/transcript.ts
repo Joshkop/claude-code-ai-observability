@@ -103,6 +103,93 @@ export function extractPerTurnTokens(path: string): TurnTokens[] {
   return turns;
 }
 
+export interface SidechainUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  model: string | null;
+  /** Unix-seconds timestamp of the first sidechain user message (best-effort). */
+  startTime?: number;
+  /** Unix-seconds timestamp of the last assistant message (best-effort). */
+  endTime?: number;
+  /** Number of assistant turns recorded in this sidechain transcript. */
+  assistantTurnCount: number;
+}
+
+interface SidechainLine extends TranscriptLine {
+  isSidechain?: boolean;
+  timestamp?: string;
+}
+
+/**
+ * Aggregate token usage across an entire sidechain (subagent) transcript.
+ * Unlike extractPerTurnTokens which breaks per user-message boundary, this
+ * sums every assistant usage record in the file — the natural unit for one
+ * subagent invocation since subagents typically run a single self-contained
+ * loop and write one transcript file.
+ */
+export function extractSidechainUsage(filePath: string): SidechainUsage | null {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let cacheCreationTokens = 0;
+  let model: string | null = null;
+  let startTime: number | undefined;
+  let endTime: number | undefined;
+  let assistantTurnCount = 0;
+  let any = false;
+
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: SidechainLine;
+    try {
+      parsed = JSON.parse(trimmed) as SidechainLine;
+    } catch {
+      continue;
+    }
+    const ts = parsed.timestamp ? Date.parse(parsed.timestamp) / 1000 : undefined;
+    if (parsed.type === "user" && ts !== undefined && startTime === undefined) {
+      startTime = ts;
+    }
+    if (parsed.type === "assistant") {
+      any = true;
+      assistantTurnCount += 1;
+      if (ts !== undefined) endTime = ts;
+      const usage = parsed.message?.usage;
+      if (usage) {
+        const input = usage.input_tokens ?? 0;
+        const cacheCreate = usage.cache_creation_input_tokens ?? 0;
+        const cacheRead = usage.cache_read_input_tokens ?? 0;
+        const output = usage.output_tokens ?? 0;
+        inputTokens += input + cacheCreate + cacheRead;
+        cachedInputTokens += cacheRead;
+        cacheCreationTokens += cacheCreate;
+        outputTokens += output;
+      }
+      if (parsed.message?.model) model = parsed.message.model;
+    }
+  }
+  if (!any) return null;
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    cacheCreationTokens,
+    model,
+    startTime,
+    endTime,
+    assistantTurnCount,
+  };
+}
+
 export function extractTotals(turns: TurnTokens[]): Totals {
   let inputTokens = 0;
   let outputTokens = 0;

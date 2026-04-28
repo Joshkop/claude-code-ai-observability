@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractPerTurnTokens, extractTotals } from "../src/transcript.js";
+import { extractPerTurnTokens, extractSidechainUsage, extractTotals } from "../src/transcript.js";
 
 function tmpFile(content: string): string {
   const p = join(tmpdir(), `transcript-test-${Date.now()}-${Math.random()}.jsonl`);
@@ -118,5 +118,60 @@ describe("extractTotals", () => {
     expect(totals.outputTokens).toBe(130);
     expect(totals.cachedInputTokens).toBe(30);
     expect(totals.totalTokens).toBe(430);
+  });
+});
+
+describe("extractSidechainUsage", () => {
+  const files: string[] = [];
+  function make(content: string): string {
+    const p = tmpFile(content);
+    files.push(p);
+    return p;
+  }
+  afterEach(() => {
+    for (const f of files) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+    files.length = 0;
+  });
+
+  it("aggregates assistant usage across the whole sidechain", () => {
+    const p = make(
+      [
+        JSON.stringify({ type: "user", isSidechain: true, timestamp: "2026-04-28T10:00:00Z", message: { role: "user", content: "go" } }),
+        JSON.stringify({
+          type: "assistant",
+          isSidechain: true,
+          timestamp: "2026-04-28T10:00:01Z",
+          message: { model: "claude-sonnet-4-6", role: "assistant", usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 100 } },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          isSidechain: true,
+          timestamp: "2026-04-28T10:00:05Z",
+          message: { model: "claude-sonnet-4-6", role: "assistant", usage: { input_tokens: 3, output_tokens: 7, cache_read_input_tokens: 50 } },
+        }),
+      ].join("\n"),
+    );
+    const u = extractSidechainUsage(p);
+    expect(u).not.toBeNull();
+    expect(u!.model).toBe("claude-sonnet-4-6");
+    // input = (10+5+100) + (3+0+50) = 168
+    expect(u!.inputTokens).toBe(168);
+    expect(u!.outputTokens).toBe(27);
+    expect(u!.cachedInputTokens).toBe(150);
+    expect(u!.cacheCreationTokens).toBe(5);
+    expect(u!.assistantTurnCount).toBe(2);
+    expect(u!.startTime).toBe(Date.parse("2026-04-28T10:00:00Z") / 1000);
+    expect(u!.endTime).toBe(Date.parse("2026-04-28T10:00:05Z") / 1000);
+  });
+
+  it("returns null when no assistant entries are present", () => {
+    const p = make(JSON.stringify({ type: "user", message: { role: "user", content: "go" } }));
+    expect(extractSidechainUsage(p)).toBeNull();
+  });
+
+  it("returns null when file does not exist", () => {
+    expect(extractSidechainUsage("/no/such/file.jsonl")).toBeNull();
   });
 });

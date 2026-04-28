@@ -1,6 +1,9 @@
+import path from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import type * as Sentry from "@sentry/node";
 import type { HookEvent, PreToolUseEvent, PostToolUseEvent } from "./types.js";
 import { scrubString } from "./serialize.js";
+import { extractSidechainUsage, type SidechainUsage } from "./transcript.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 type SentryLike = typeof Sentry;
@@ -9,6 +12,13 @@ interface ActiveSubagent {
   span: Span;
   subagentType: string;
   toolUseId?: string;
+  /** Snapshot of agent-*.jsonl filenames present at PreToolUse — used to
+   *  identify the new sidechain transcript that belongs to this invocation. */
+  preExisting?: Set<string>;
+  /** Directory we'll scan for the new sidechain transcript on PostToolUse. */
+  subagentDir?: string;
+  /** Wall-clock ms at PreToolUse — fallback for selecting the newest file. */
+  startedAt: number;
 }
 
 export interface SubagentSession {
@@ -18,6 +28,7 @@ export interface SubagentSession {
 export interface CreateSubagentSpanOptions {
   parent?: Span;
   maxAttrLen?: number;
+  parentTranscriptPath?: string;
 }
 
 export function createSubagentSession(): SubagentSession {
@@ -31,6 +42,27 @@ export function isSubagentInvocation(event: HookEvent | undefined | null): boole
   }
   const toolName = (event as PreToolUseEvent | PostToolUseEvent).tool_name;
   return toolName === "Task" || toolName === "Agent";
+}
+
+/**
+ * Returns the most-recently-started active subagent wrapper span for the
+ * given session, or null. Used by the dispatcher to nest tool calls that
+ * occur while a subagent is running under the wrapper instead of directly
+ * under the parent turn span.
+ */
+export function findActiveSubagentSpan(
+  session: SubagentSession,
+  sessionId: string | undefined,
+): Span | null {
+  if (!sessionId) return null;
+  // Map preserves insertion order — the last entry is the most recently
+  // started wrapper. Iterate to the end and keep that one. We don't filter
+  // by sessionId because the active map is collector-global and tool_use_id
+  // is unique across sessions; the dispatcher handles the per-session
+  // boundary by only looking up while a subagent is in flight.
+  let latest: ActiveSubagent | null = null;
+  for (const entry of session.active.values()) latest = entry;
+  return latest?.span ?? null;
 }
 
 export function createSubagentSpan(
@@ -73,7 +105,7 @@ export function attachSubagentToEvent(
   sentry: SentryLike,
   session: SubagentSession,
   event: HookEvent,
-  options: { parent?: Span; maxAttrLen?: number } = {},
+  options: { parent?: Span; maxAttrLen?: number; parentTranscriptPath?: string } = {},
 ): boolean {
   if (!isSubagentInvocation(event)) return false;
 
@@ -83,10 +115,14 @@ export function attachSubagentToEvent(
     if (!span) return true;
     const key = pre.tool_use_id ?? `${pre.session_id}:${session.active.size}`;
     const { subagentType } = readTaskInput(pre.tool_input);
+    const subagentDir = computeSubagentDir(options.parentTranscriptPath, pre.session_id);
     session.active.set(key, {
       span,
       subagentType: subagentType ?? "subagent",
       toolUseId: pre.tool_use_id,
+      preExisting: subagentDir ? listAgentFiles(subagentDir) : undefined,
+      subagentDir,
+      startedAt: Date.now(),
     });
     return true;
   }
@@ -98,6 +134,17 @@ export function attachSubagentToEvent(
     const entry = session.active.get(key);
     if (!entry) return true;
     session.active.delete(key);
+
+    // Synthesize a gen_ai.chat child under the wrapper carrying the
+    // subagent's actual model + token usage. Without this the wrapper span
+    // is a stub and Sentry's AI Agents widgets show no per-subagent
+    // breakdown.
+    try {
+      const usage = locateSidechainUsage(entry);
+      if (usage) attachChatChild(sentry, entry.span, usage);
+    } catch {
+      // best-effort — never fail PostToolUse on observability gaps.
+    }
 
     if (post.tool_error) {
       trySetStatus(entry.span, "internal_error");
@@ -126,6 +173,153 @@ function readTaskInput(input: unknown): {
     prompt: typeof o.prompt === "string" ? o.prompt : undefined,
     description: typeof o.description === "string" ? o.description : undefined,
   };
+}
+
+/**
+ * Resolve the per-session subagents directory. Claude Code lays transcripts
+ * out as `<projectDir>/<sessionId>.jsonl` plus a sibling
+ * `<projectDir>/<sessionId>/subagents/agent-*.jsonl` per spawned subagent.
+ */
+function computeSubagentDir(
+  parentTranscriptPath: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  if (!parentTranscriptPath || !sessionId) return undefined;
+  const dir = path.dirname(parentTranscriptPath);
+  return path.join(dir, sessionId, "subagents");
+}
+
+function listAgentFiles(dir: string): Set<string> {
+  try {
+    return new Set(readdirSync(dir).filter((f) => f.startsWith("agent-") && f.endsWith(".jsonl")));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Find the sidechain transcript that belongs to this subagent invocation.
+ * Strategy:
+ *  1. List current agent-*.jsonl files; new ones are candidates.
+ *  2. Prefer the candidate whose .meta.json agentType matches subagentType.
+ *  3. Otherwise fall back to the most-recently-modified candidate.
+ *  4. If no new files exist (subagent reused an existing transcript or
+ *     dir layout differs), fall back to the newest file modified after
+ *     the wrapper started.
+ */
+function locateSidechainUsage(entry: ActiveSubagent): SidechainUsage | null {
+  if (!entry.subagentDir) return null;
+  const dir = entry.subagentDir;
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.startsWith("agent-") && f.endsWith(".jsonl"));
+  } catch {
+    return null;
+  }
+  if (!files.length) return null;
+  const preExisting = entry.preExisting ?? new Set<string>();
+  const candidates = files.filter((f) => !preExisting.has(f));
+  const search = candidates.length ? candidates : files;
+
+  type Scored = { file: string; mtimeMs: number; agentTypeMatch: boolean };
+  const scored: Scored[] = [];
+  for (const f of search) {
+    const full = path.join(dir, f);
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(full).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (mtimeMs < entry.startedAt - 5_000) continue; // not from this invocation
+    const meta = readMeta(full);
+    const agentTypeMatch =
+      typeof meta?.agentType === "string" && meta.agentType === entry.subagentType;
+    scored.push({ file: full, mtimeMs, agentTypeMatch });
+  }
+  if (!scored.length) return null;
+
+  scored.sort((a, b) => {
+    if (a.agentTypeMatch !== b.agentTypeMatch) return a.agentTypeMatch ? -1 : 1;
+    return b.mtimeMs - a.mtimeMs;
+  });
+  return extractSidechainUsage(scored[0].file);
+}
+
+function readMeta(transcriptPath: string): { agentType?: string } | null {
+  const metaPath = transcriptPath.replace(/\.jsonl$/, ".meta.json");
+  try {
+    const raw = readFileSync(metaPath, "utf8");
+    const parsed = JSON.parse(raw) as { agentType?: string };
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function attachChatChild(sentry: SentryLike, wrapper: Span, usage: SidechainUsage): void {
+  const startSpan = (sentry as unknown as {
+    startInactiveSpan?: (opts: unknown) => Span;
+    withActiveSpan?: <T>(parent: unknown, fn: () => T) => T;
+  });
+  if (typeof startSpan.startInactiveSpan !== "function") return;
+
+  const create = (): Span => {
+    const attrs: Record<string, string | number> = {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": "anthropic",
+      "gen_ai.system": "anthropic",
+    };
+    if (usage.model) {
+      attrs["gen_ai.request.model"] = usage.model;
+      attrs["gen_ai.response.model"] = usage.model;
+    }
+    return startSpan.startInactiveSpan!.call(sentry, {
+      op: "gen_ai.chat",
+      name: usage.model ? `chat ${usage.model}` : "chat",
+      ...(usage.startTime ? { startTime: usage.startTime } : {}),
+      attributes: attrs,
+    });
+  };
+
+  let chat: Span;
+  if (typeof startSpan.withActiveSpan === "function") {
+    chat = startSpan.withActiveSpan.call(sentry, wrapper, create) as Span;
+  } else {
+    chat = create();
+  }
+
+  trySetAttribute(chat, "gen_ai.usage.input_tokens", usage.inputTokens);
+  trySetAttribute(chat, "gen_ai.usage.output_tokens", usage.outputTokens);
+  trySetAttribute(chat, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
+  trySetAttribute(chat, "gen_ai.usage.input_tokens.cached", usage.cachedInputTokens);
+  if (usage.cacheCreationTokens) {
+    trySetAttribute(chat, "gen_ai.usage.input_tokens.cache_write", usage.cacheCreationTokens);
+  }
+  if (typeof usage.assistantTurnCount === "number") {
+    trySetAttribute(chat, "claude_code.subagent.assistant_turns", usage.assistantTurnCount);
+  }
+  // End the chat at the same time we end the wrapper. Pass endTime explicitly
+  // so the chat span matches the subagent's actual end timestamp from the
+  // transcript (otherwise it'd default to "now" minus the wrapper duration).
+  const endTime = usage.endTime;
+  const endFn = (chat as unknown as { end?: (t?: number) => void }).end;
+  if (typeof endFn === "function") {
+    try {
+      endFn.call(chat, endTime);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Mirror the model + cumulative-usage rollup onto the wrapper for filters.
+  if (usage.model) {
+    trySetAttribute(wrapper, "gen_ai.request.model", usage.model);
+    trySetAttribute(wrapper, "gen_ai.response.model", usage.model);
+  }
+  trySetAttribute(wrapper, "gen_ai.usage.input_tokens", usage.inputTokens);
+  trySetAttribute(wrapper, "gen_ai.usage.output_tokens", usage.outputTokens);
+  trySetAttribute(wrapper, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
 }
 
 function truncate(s: string, max: number): string {
