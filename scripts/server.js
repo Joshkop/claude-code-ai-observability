@@ -4,7 +4,7 @@ import { reportPluginError } from "./sentry-errors.js";
 import { closeTurnSpan, createToolSpan, openTurnTransaction, } from "./spans.js";
 import { extractPerTurnTokens } from "./transcript.js";
 import { detectContext } from "./context.js";
-import { attachSubagentToEvent, createSubagentSession } from "./subagent.js";
+import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
 import { applyToolError, captureBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
@@ -199,6 +199,7 @@ export function startServer(sentry, config, baseAutoTags) {
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             parent: parent ?? undefined,
             maxAttrLen: config.maxAttributeLength,
+            parentTranscriptPath: record.transcriptPath,
         })) {
             record.toolCount += 1;
             record.turnSubagentCount += 1;
@@ -206,7 +207,12 @@ export function startServer(sentry, config, baseAutoTags) {
             return;
         }
         const startedAt = Date.now();
-        const span = createToolSpan(sentry, parent, event.tool_name, event.tool_input, config, undefined, event.tool_use_id);
+        // While a subagent is active in this session, nest its tool calls under
+        // the wrapper span so the trace shows the subagent's tool work as
+        // children of invoke_agent <subagent_type> rather than siblings on the
+        // parent turn. Falls back to the turn span when no subagent is active.
+        const toolParent = findActiveSubagentSpan(subagentSession, event.session_id) ?? parent;
+        const span = createToolSpan(sentry, toolParent, event.tool_name, event.tool_input, config, undefined, event.tool_use_id);
         const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount}`;
         record.pendingTools.set(key, { span, startedAt, toolName: event.tool_name });
         record.toolCount += 1;
@@ -220,6 +226,7 @@ export function startServer(sentry, config, baseAutoTags) {
         record.lastEventAt = Date.now();
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             maxAttrLen: config.maxAttributeLength,
+            parentTranscriptPath: record.transcriptPath,
         })) {
             if (event.tool_error) {
                 captureBreadcrumb(sentry, {
