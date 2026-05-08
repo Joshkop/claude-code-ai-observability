@@ -31,6 +31,14 @@ async function startCollector(config: ResolvedPluginConfig): Promise<void> {
     release: config.release,
     debug: config.debug,
   });
+  // Promote user-configured tags (e.g. `developer`) to the isolation scope
+  // BEFORE any spans are created, so they propagate to every child span
+  // (gen_ai.chat, gen_ai.execute_tool, ...) — not just the gen_ai.invoke_agent
+  // root. Span-level setAttribute does not propagate to children, which is
+  // why filtering `span.op:gen_ai.chat developer:<name>` returned nothing.
+  for (const [k, v] of Object.entries(config.tags)) {
+    if (v !== undefined && v !== null) Sentry.setTag(k, v);
+  }
   // Tag every event with the operating-system user so Sentry's built-in
   // "user" filter splits traces by developer on shared hosts. We deliberately
   // avoid email / IP — those would be PII without the user opting in.
