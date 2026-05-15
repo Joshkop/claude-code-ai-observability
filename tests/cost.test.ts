@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { computeCost, loadPriceTable, DEFAULT_PRICE_TABLE } from "../src/cost.js";
+import { computeCost, loadPriceTable, DEFAULT_PRICE_TABLE, resolveModelPrice } from "../src/cost.js";
 
 describe("computeCost", () => {
   it("returns zero cost for null model", () => {
@@ -210,5 +210,38 @@ describe("loadPriceTable", () => {
     });
     // Documented precedence: defaults < env < config.prices < direct overrides.
     expect(table["claude-opus-4-7"].input).toBe(7);
+  });
+});
+
+describe("C3 — tiered model resolution", () => {
+  it("exact key wins", () => {
+    expect(resolveModelPrice("claude-opus-4-7", DEFAULT_PRICE_TABLE)!.input).toBe(15);
+  });
+
+  it("date-suffixed model resolves via prefix", () => {
+    const e = resolveModelPrice("claude-opus-4-7-20260101", DEFAULT_PRICE_TABLE);
+    expect(e!.input).toBe(15);
+  });
+
+  it("family heuristic maps unknown sonnet to the sonnet default", () => {
+    const e = resolveModelPrice("claude-sonnet-9-9-experimental", DEFAULT_PRICE_TABLE);
+    expect(e!.input).toBe(3);
+  });
+
+  it("truly unknown model is unpriced and flagged", () => {
+    const cost = computeCost(
+      { model: "gpt-4o", inputTokens: 1000, cachedInputTokens: 0, outputTokens: 500 },
+      DEFAULT_PRICE_TABLE,
+    );
+    expect(cost.totalCost).toBe(0);
+    expect(cost.unpricedModel).toBe("gpt-4o");
+  });
+
+  it("priced model leaves unpricedModel undefined", () => {
+    const cost = computeCost(
+      { model: "claude-opus-4-7", inputTokens: 1000, cachedInputTokens: 0, outputTokens: 500 },
+      DEFAULT_PRICE_TABLE,
+    );
+    expect(cost.unpricedModel).toBeUndefined();
   });
 });

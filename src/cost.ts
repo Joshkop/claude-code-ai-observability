@@ -6,6 +6,8 @@ export interface TurnCost {
   inputCost: number;
   outputCost: number;
   totalCost: number;
+  /** Set to the raw model string when no price entry could be resolved. */
+  unpricedModel?: string;
 }
 
 export interface ComputeCostInput {
@@ -23,6 +25,49 @@ export const DEFAULT_PRICE_TABLE: PriceTable = {
   "claude-sonnet-4-6": { input: 3, cacheCreation: 3.75, cacheRead: 0.3, output: 15 },
   "claude-haiku-4-5-20251001": { input: 1, cacheCreation: 1.25, cacheRead: 0.1, output: 5 },
 };
+
+const FAMILY_DEFAULT_KEY: Record<"opus" | "sonnet" | "haiku", string> = {
+  opus: "claude-opus-4-7",
+  sonnet: "claude-sonnet-4-6",
+  haiku: "claude-haiku-4-5-20251001",
+};
+
+function familyOf(model: string): "opus" | "sonnet" | "haiku" | null {
+  const s = model.toLowerCase();
+  if (s.includes("opus")) return "opus";
+  if (s.includes("sonnet")) return "sonnet";
+  if (s.includes("haiku")) return "haiku";
+  return null;
+}
+
+/**
+ * C3: exact key → strip trailing -YYYYMMDD → table key is a prefix →
+ * family heuristic → null (unpriced).
+ */
+export function resolveModelPrice(
+  model: string,
+  table: PriceTable = DEFAULT_PRICE_TABLE,
+): ModelPriceEntry | null {
+  if (table[model]) return table[model];
+
+  const stripped = model.replace(/-\d{8}$/, "");
+  if (stripped !== model && table[stripped]) return table[stripped];
+
+  for (const k of Object.keys(table)) {
+    if (model === k || model.startsWith(k + "-")) return table[k];
+    if (stripped === k || stripped.startsWith(k + "-")) return table[k];
+  }
+
+  const fam = familyOf(model);
+  if (fam) {
+    for (const [k, v] of Object.entries(table)) {
+      if (k.includes(fam)) return v;
+    }
+    const def = DEFAULT_PRICE_TABLE[FAMILY_DEFAULT_KEY[fam]];
+    if (def) return def;
+  }
+  return null;
+}
 
 export function loadPriceTable(
   overrides?: PriceTable | null,
@@ -59,8 +104,8 @@ export function computeCost(
   const zero: TurnCost = { inputCost: 0, outputCost: 0, totalCost: 0 };
 
   if (!input || !input.model) return zero;
-  const price = table[input.model];
-  if (!price) return zero;
+  const price = resolveModelPrice(input.model, table);
+  if (!price) return { ...zero, unpricedModel: input.model };
 
   const inputTokens = toNonNegInt(input.inputTokens);
   const cachedInputTokens = Math.min(toNonNegInt(input.cachedInputTokens), inputTokens);
