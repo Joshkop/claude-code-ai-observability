@@ -69,3 +69,40 @@ describe("readTranscript — missing/empty file is not parse-degraded", () => {
     expect(r.degraded).toBe(false);
   });
 });
+
+describe("readTranscript — C6 soft-fail", () => {
+  it("degrades to legacy positional when no line has a recognizable type", () => {
+    const p = make(
+      [JSON.stringify({ foo: 1 }), JSON.stringify({ bar: 2 })].join("\n"),
+    );
+    const r = readTranscript(p);
+    expect(r.degraded).toBe(true);
+    expect(r.degradedReason).toMatch(/no recognizable transcript line types/);
+  });
+
+  it("does NOT degrade on a well-formed transcript", () => {
+    const p = make(
+      [
+        JSON.stringify({ type: "user", promptId: "p1", message: { content: "hi" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 5, output_tokens: 1 } } }),
+      ].join("\n"),
+    );
+    expect(readTranscript(p).degraded).toBe(false);
+  });
+});
+
+describe("readTranscript — N4 session dimensions", () => {
+  it("extracts permission_mode / agent_name / entrypoint from metadata lines", () => {
+    const p = make(
+      [
+        JSON.stringify({ type: "summary", permissionMode: "bypassPermissions", agentName: "claude-code", entrypoint: "cli" }),
+        JSON.stringify({ type: "user", promptId: "p1", message: { content: "hi" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 5, output_tokens: 1 } } }),
+      ].join("\n"),
+    );
+    const r = readTranscript(p);
+    expect(r.session.permissionMode).toBe("bypassPermissions");
+    expect(r.session.agentName).toBe("claude-code");
+    expect(r.session.entrypoint).toBe("cli");
+  });
+});
