@@ -30,3 +30,33 @@ export function parseSlashCommand(prompt) {
         return null;
     return m[1] ? { plugin: m[1], name: m[2] } : { name: m[2] };
 }
+/**
+ * N3 derivation order:
+ *  1. namespace in subagent_type (`plugin:agent`) → authoritative.
+ *  2. best-effort: resolve the agent definition file and test whether it
+ *     lives under a known plugin / project / user agents dir.
+ *  3. otherwise `unknown`.
+ */
+export function deriveSubagentSource(subagentType, agentDefPath) {
+    if (subagentType && subagentType.includes(":")) {
+        const plugin = subagentType.slice(0, subagentType.indexOf(":"));
+        if (plugin)
+            return { source: `plugin:${plugin}`, inferred: false };
+    }
+    if (agentDefPath) {
+        const norm = agentDefPath.replace(/\\/g, "/");
+        // ~/.claude/plugins/**/<plugin>/agents/<file>
+        const plug = norm.match(/\/plugins\/(?:[^/]+\/)*?([^/]+)\/agents\//);
+        if (plug && plug[1])
+            return { source: `plugin:${plug[1]}`, inferred: true };
+        if (/(^|\/)\.claude\/agents\//.test(norm)) {
+            // Disambiguate user (~/.claude) vs project (./.claude) by home dir.
+            const home = (process.env.HOME ?? "").replace(/\\/g, "/");
+            if (home && norm.startsWith(`${home}/.claude/agents/`)) {
+                return { source: "user", inferred: true };
+            }
+            return { source: "project", inferred: true };
+        }
+    }
+    return { source: "unknown", inferred: false };
+}

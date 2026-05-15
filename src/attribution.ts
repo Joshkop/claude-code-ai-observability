@@ -41,3 +41,44 @@ export function parseSlashCommand(prompt: string): CommandRef | null {
   if (!m) return null;
   return m[1] ? { plugin: m[1], name: m[2] } : { name: m[2] };
 }
+
+export interface SubagentSource {
+  /** built-in | user | project | plugin:<name> | unknown */
+  source: string;
+  /** N3: true when derived by best-effort path inference (discountable). */
+  inferred: boolean;
+}
+
+/**
+ * N3 derivation order:
+ *  1. namespace in subagent_type (`plugin:agent`) → authoritative.
+ *  2. best-effort: resolve the agent definition file and test whether it
+ *     lives under a known plugin / project / user agents dir.
+ *  3. otherwise `unknown`.
+ */
+export function deriveSubagentSource(
+  subagentType: string | undefined,
+  agentDefPath: string | undefined,
+): SubagentSource {
+  if (subagentType && subagentType.includes(":")) {
+    const plugin = subagentType.slice(0, subagentType.indexOf(":"));
+    if (plugin) return { source: `plugin:${plugin}`, inferred: false };
+  }
+
+  if (agentDefPath) {
+    const norm = agentDefPath.replace(/\\/g, "/");
+    // ~/.claude/plugins/**/<plugin>/agents/<file>
+    const plug = norm.match(/\/plugins\/(?:[^/]+\/)*?([^/]+)\/agents\//);
+    if (plug && plug[1]) return { source: `plugin:${plug[1]}`, inferred: true };
+    if (/(^|\/)\.claude\/agents\//.test(norm)) {
+      // Disambiguate user (~/.claude) vs project (./.claude) by home dir.
+      const home = (process.env.HOME ?? "").replace(/\\/g, "/");
+      if (home && norm.startsWith(`${home}/.claude/agents/`)) {
+        return { source: "user", inferred: true };
+      }
+      return { source: "project", inferred: true };
+    }
+  }
+
+  return { source: "unknown", inferred: false };
+}
