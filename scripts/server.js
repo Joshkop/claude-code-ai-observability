@@ -215,13 +215,16 @@ export function startServer(sentry, config, baseAutoTags) {
     // R2: SessionStart can be missed (collector spawned mid-session or the
     // event was dropped). Build a minimal record from the event so whole
     // turns aren't blacked out. Spans get claude_code.session.synthesized.
+    // Note: a late SessionStart for an already-synthesized session is dropped
+    // by handleSessionStart's `sessions.has` guard, so `synthesized` stays
+    // true for its lifetime — accepted (data is degraded, never wrong; the
+    // transcript still carries the model per turn).
     const getOrCreateSession = (event) => {
         const sid = event.session_id;
         const existing = sessions.get(sid);
         if (existing)
             return existing;
         const cwd = event._aiobs?.context?.cwd;
-        const transcriptPath = event.transcript_path;
         const record = {
             currentTurnSpan: null,
             currentTurnStart: null,
@@ -230,7 +233,9 @@ export function startServer(sentry, config, baseAutoTags) {
             turnToolCount: 0,
             turnSubagentCount: 0,
             turnTools: new Set(),
-            transcriptPath,
+            // Only the 3 tool/prompt handlers call this; none carry
+            // transcript_path. handleSessionEnd upgrades it later if it arrives.
+            transcriptPath: undefined,
             model: undefined,
             turnIndex: -1,
             autoTags: {
