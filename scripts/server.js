@@ -8,7 +8,7 @@ import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } 
 import { computeCost, loadPriceTable } from "./cost.js";
 import { applyToolError, captureBreadcrumb, captureDroppedBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
-import { parseMcpTool, parseSkillInput } from "./attribution.js";
+import { parseMcpTool, parseSkillInput, parseSlashCommand } from "./attribution.js";
 import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 const FLUSH_INTERVAL_MS = 30_000;
@@ -273,6 +273,19 @@ export function startServer(sentry, config, baseAutoTags) {
                 record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
             }
             catch { /* ignore */ }
+        }
+        // N2: a slash command in the prompt → command attribution on the turn.
+        if (prompt) {
+            const cmd = parseSlashCommand(prompt);
+            if (cmd && record.currentTurnSpan) {
+                try {
+                    record.currentTurnSpan.setAttribute("claude_code.command.name", cmd.name);
+                    if (cmd.plugin) {
+                        record.currentTurnSpan.setAttribute("claude_code.command.plugin", cmd.plugin);
+                    }
+                }
+                catch { /* ignore */ }
+            }
         }
     };
     const handlePreTool = (event) => {

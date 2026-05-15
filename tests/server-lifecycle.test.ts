@@ -394,3 +394,38 @@ describe("server: MCP + Skill tool attribution (N1/N2)", () => {
     expect(toolSpan!.attrs["claude_code.skill.plugin"]).toBe("superpowers");
   });
 });
+
+describe("server: slash-command attribution (N2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("sets claude_code.command.name/plugin from a namespaced command", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "sc" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc", prompt: "/superpowers:writing-plans go" });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.command.name"]).toBe("writing-plans");
+    expect(turn!.attrs["claude_code.command.plugin"]).toBe("superpowers");
+  });
+
+  it("does not set command attrs for a normal prompt", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "sc2" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc2", prompt: "just a normal prompt" });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
+  });
+});
