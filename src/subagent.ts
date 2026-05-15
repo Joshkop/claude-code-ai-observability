@@ -123,6 +123,10 @@ export function attachSubagentToEvent(
       parent: enclosing?.span ?? options.parent,
     });
     if (!span) return true;
+    // Real Claude Code Task/Agent events always carry tool_use_id; the
+    // `?? size` fallback only sequences pathological no-id events. Two
+    // concurrent no-id subagents in one session would resolve FIFO at
+    // PostToolUse (findFirstKeyForSession) — acceptable for that edge.
     const key = `${pre.session_id}::${pre.tool_use_id ?? session.active.size}`;
     const { subagentType, description, prompt } = readTaskInput(pre.tool_input);
     const subagentDir = computeSubagentDir(options.parentTranscriptPath, pre.session_id);
@@ -253,6 +257,9 @@ function locateSidechainUsage(entry: ActiveSubagent): SidechainUsage | null {
     } catch {
       continue;
     }
+    // 5s back-window tolerates clock skew between PreToolUse and the
+    // sidechain file's first write; `search` already excludes preExisting
+    // files so this only guards the no-new-candidates fallback path.
     if (mtimeMs < entry.startedAt - 5_000) continue;
     const meta = readMeta(full);
     const descMatch =
