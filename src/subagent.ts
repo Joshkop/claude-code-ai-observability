@@ -19,6 +19,13 @@ interface ActiveSubagent {
   subagentDir?: string;
   /** Wall-clock ms at PreToolUse — fallback for selecting the newest file. */
   startedAt: number;
+  sessionId: string;
+  /** C5 match keys captured from the Task tool_input at PreToolUse. */
+  matchDescription?: string;
+  matchPrompt?: string;
+  /** N5 nesting. */
+  parentSpan?: Span;
+  depth: number;
 }
 
 export interface SubagentSession {
@@ -55,13 +62,11 @@ export function findActiveSubagentSpan(
   sessionId: string | undefined,
 ): Span | null {
   if (!sessionId) return null;
-  // Map preserves insertion order — the last entry is the most recently
-  // started wrapper. Iterate to the end and keep that one. We don't filter
-  // by sessionId because the active map is collector-global and tool_use_id
-  // is unique across sessions; the dispatcher handles the per-session
-  // boundary by only looking up while a subagent is in flight.
   let latest: ActiveSubagent | null = null;
-  for (const entry of session.active.values()) latest = entry;
+  for (const entry of session.active.values()) {
+    if (entry.sessionId !== sessionId) continue;
+    latest = entry; // Map preserves insertion order; last match = most recent.
+  }
   return latest?.span ?? null;
 }
 
@@ -111,10 +116,15 @@ export function attachSubagentToEvent(
 
   if (event.hook_event_name === "PreToolUse") {
     const pre = event as PreToolUseEvent;
-    const span = createSubagentSpan(sentry, pre, options);
+    // N5: nest under an already-active subagent for THIS session, if any.
+    const enclosing = findEnclosingActive(session, pre.session_id);
+    const span = createSubagentSpan(sentry, pre, {
+      ...options,
+      parent: enclosing?.span ?? options.parent,
+    });
     if (!span) return true;
-    const key = pre.tool_use_id ?? `${pre.session_id}:${session.active.size}`;
-    const { subagentType } = readTaskInput(pre.tool_input);
+    const key = `${pre.session_id}::${pre.tool_use_id ?? session.active.size}`;
+    const { subagentType, description, prompt } = readTaskInput(pre.tool_input);
     const subagentDir = computeSubagentDir(options.parentTranscriptPath, pre.session_id);
     session.active.set(key, {
       span,
@@ -123,13 +133,20 @@ export function attachSubagentToEvent(
       preExisting: subagentDir ? listAgentFiles(subagentDir) : undefined,
       subagentDir,
       startedAt: Date.now(),
+      sessionId: pre.session_id,
+      matchDescription: description,
+      matchPrompt: prompt,
+      parentSpan: enclosing?.span ?? options.parent,
+      depth: enclosing ? enclosing.depth + 1 : 0,
     });
     return true;
   }
 
   if (event.hook_event_name === "PostToolUse") {
     const post = event as PostToolUseEvent;
-    const key = post.tool_use_id ?? findFirstKey(session.active);
+    const key = post.tool_use_id
+      ? findKeyByToolUse(session.active, post.session_id, post.tool_use_id)
+      : findFirstKeyForSession(session.active, post.session_id);
     if (!key) return true;
     const entry = session.active.get(key);
     if (!entry) return true;
@@ -221,7 +238,12 @@ function locateSidechainUsage(entry: ActiveSubagent): SidechainUsage | null {
   const candidates = files.filter((f) => !preExisting.has(f));
   const search = candidates.length ? candidates : files;
 
-  type Scored = { file: string; mtimeMs: number; agentTypeMatch: boolean };
+  type Scored = {
+    file: string;
+    mtimeMs: number;
+    descMatch: boolean;
+    agentTypeMatch: boolean;
+  };
   const scored: Scored[] = [];
   for (const f of search) {
     const full = path.join(dir, f);
@@ -231,26 +253,39 @@ function locateSidechainUsage(entry: ActiveSubagent): SidechainUsage | null {
     } catch {
       continue;
     }
-    if (mtimeMs < entry.startedAt - 5_000) continue; // not from this invocation
+    if (mtimeMs < entry.startedAt - 5_000) continue;
     const meta = readMeta(full);
+    const descMatch =
+      !!entry.matchDescription &&
+      typeof meta?.description === "string" &&
+      meta.description === entry.matchDescription;
     const agentTypeMatch =
       typeof meta?.agentType === "string" && meta.agentType === entry.subagentType;
-    scored.push({ file: full, mtimeMs, agentTypeMatch });
+    scored.push({ file: full, mtimeMs, descMatch, agentTypeMatch });
   }
   if (!scored.length) return null;
 
   scored.sort((a, b) => {
+    // C5: exact description match is authoritative; agentType then mtime
+    // are tiebreakers only.
+    if (a.descMatch !== b.descMatch) return a.descMatch ? -1 : 1;
     if (a.agentTypeMatch !== b.agentTypeMatch) return a.agentTypeMatch ? -1 : 1;
     return b.mtimeMs - a.mtimeMs;
   });
   return extractSidechainUsage(scored[0].file);
 }
 
-function readMeta(transcriptPath: string): { agentType?: string } | null {
+function readMeta(
+  transcriptPath: string,
+): { agentType?: string; name?: string; description?: string } | null {
   const metaPath = transcriptPath.replace(/\.jsonl$/, ".meta.json");
   try {
     const raw = readFileSync(metaPath, "utf8");
-    const parsed = JSON.parse(raw) as { agentType?: string };
+    const parsed = JSON.parse(raw) as {
+      agentType?: string;
+      name?: string;
+      description?: string;
+    };
     return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
     return null;
@@ -346,9 +381,36 @@ function coerceErrorMessage(value: unknown, max: number): string | null {
   return scrubString(truncate(s, max));
 }
 
-function findFirstKey(m: Map<string, unknown>): string | undefined {
-  const it = m.keys().next();
-  return it.done ? undefined : it.value;
+function findKeyByToolUse(
+  m: Map<string, ActiveSubagent>,
+  sessionId: string,
+  toolUseId: string,
+): string | undefined {
+  for (const [k, v] of m) {
+    if (v.sessionId === sessionId && v.toolUseId === toolUseId) return k;
+  }
+  return undefined;
+}
+
+function findFirstKeyForSession(
+  m: Map<string, ActiveSubagent>,
+  sessionId: string,
+): string | undefined {
+  for (const [k, v] of m) {
+    if (v.sessionId === sessionId) return k;
+  }
+  return undefined;
+}
+
+function findEnclosingActive(
+  session: SubagentSession,
+  sessionId: string,
+): ActiveSubagent | null {
+  let latest: ActiveSubagent | null = null;
+  for (const v of session.active.values()) {
+    if (v.sessionId === sessionId) latest = v;
+  }
+  return latest;
 }
 
 function trySetStatus(span: Span, status: string): void {

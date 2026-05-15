@@ -310,3 +310,57 @@ describe("C2 — subagent chat-child token semantics", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("C5/N5 — per-session isolation + name/description match", () => {
+  it("two sessions do not cross-wire active subagents", () => {
+    const sentry = makeFakeSentry();
+    const session = createSubagentSession();
+    const preA: PreToolUseEvent = {
+      hook_event_name: "PreToolUse", session_id: "A", tool_name: "Task",
+      tool_use_id: "a1", tool_input: { subagent_type: "explorer", description: "da", prompt: "pa" },
+    };
+    const preB: PreToolUseEvent = {
+      hook_event_name: "PreToolUse", session_id: "B", tool_name: "Task",
+      tool_use_id: "b1", tool_input: { subagent_type: "explorer", description: "db", prompt: "pb" },
+    };
+    attachSubagentToEvent(sentry as never, session, preA);
+    attachSubagentToEvent(sentry as never, session, preB);
+    const aSpan = findActiveSubagentSpan(session, "A");
+    const bSpan = findActiveSubagentSpan(session, "B");
+    expect(aSpan).not.toBe(bSpan);
+    expect(aSpan).not.toBeNull();
+    expect(findActiveSubagentSpan(session, "C")).toBeNull();
+  });
+
+  it("matches the sidechain transcript by .meta.json name+description", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-c5-"));
+    const subDir = join(dir, "sess", "subagents");
+    mkdirSync(subDir, { recursive: true });
+    for (const [f, name, desc, inTok] of [
+      ["agent-1.jsonl", "explorer", "find auth bug", 11],
+      ["agent-2.jsonl", "explorer", "find perf bug", 22],
+    ] as const) {
+      writeFileSync(
+        join(subDir, f),
+        [
+          JSON.stringify({ type: "user", isSidechain: true, timestamp: "2026-05-15T00:00:00Z", message: { content: "go" } }),
+          JSON.stringify({ type: "assistant", isSidechain: true, timestamp: "2026-05-15T00:00:01Z", message: { model: "m", usage: { input_tokens: inTok, output_tokens: 1 } } }),
+        ].join("\n"),
+        "utf8",
+      );
+      writeFileSync(join(subDir, f.replace(/\.jsonl$/, ".meta.json")), JSON.stringify({ agentType: name, name, description: desc }), "utf8");
+    }
+    const sentry = makeFakeSentry();
+    const session = createSubagentSession();
+    const parentTranscriptPath = join(dir, "sess.jsonl");
+    const pre: PreToolUseEvent = {
+      hook_event_name: "PreToolUse", session_id: "sess", tool_name: "Task",
+      tool_use_id: "t2", tool_input: { subagent_type: "explorer", description: "find perf bug", prompt: "p" },
+    };
+    attachSubagentToEvent(sentry as never, session, pre, { parentTranscriptPath });
+    attachSubagentToEvent(sentry as never, session, { hook_event_name: "PostToolUse", session_id: "sess", tool_name: "Task", tool_use_id: "t2" } as PostToolUseEvent, { parentTranscriptPath });
+    const chat = sentry.spans.find((s) => s.attrs["gen_ai.operation.name"] === "chat")!;
+    expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(22);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
