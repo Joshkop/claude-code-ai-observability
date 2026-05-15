@@ -261,6 +261,11 @@ export function startServer(sentry, config, baseAutoTags) {
         const prompt = event.prompt ?? event.message ?? null;
         record.currentTurnStart = Date.now() / 1000;
         record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
+        // R3: touchSession already counted droppedTotal + emitted the breadcrumb
+        // for this event, but it ran before this turn's span existed (it saw the
+        // prior/closed span or null). Re-stamp the just-opened turn span so the
+        // loss is visible on the turn it actually precedes. No double count: only
+        // the span attribute is repeated here, not droppedTotal/breadcrumb.
         const droppedNow = event._aiobs?.dropped_since_last;
         if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
             try {
@@ -382,6 +387,9 @@ export function startServer(sentry, config, baseAutoTags) {
         // and parent linkage may only become known after the first hook fires.
         applyClientContext(r.autoTags, event._aiobs?.context);
         // R3: surface delivery loss the hook-client piggybacked on this event.
+        // Sole site that counts droppedTotal + emits the breadcrumb (once per
+        // event). currentTurnSpan here is the prior/open turn; handleUserPrompt
+        // additionally re-stamps the newly opened turn span (attribute only).
         const dropped = event._aiobs?.dropped_since_last;
         if (typeof dropped === "number" && dropped > 0) {
             droppedTotal += dropped;
