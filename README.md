@@ -15,6 +15,15 @@ Comprehensive AI Agent Observability plugin for Claude Code. Sends realtime Open
 - `PreCompact` and `Stop` hooks handled gracefully (no-op, no crash).
 - WSL2-safe health probes: the hook client uses `AbortSignal.timeout(500)` to avoid hanging on silently-dropped ports.
 
+### Upgrading to v0.2.0 (behavior change)
+
+v0.2.0 corrects per-turn token/cost segmentation and aligns
+`gen_ai.usage.input_tokens` with Sentry's schema (non-cached input only).
+Existing dashboards keep working but show shifted, now-correct numbers —
+rebuild cost/token panels per
+[`docs/sentry-dashboard-migration.md`](docs/sentry-dashboard-migration.md).
+No config changes are required.
+
 ## Install
 
 ### Claude Code plugin marketplace
