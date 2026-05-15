@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "../src/server.js";
@@ -228,6 +229,54 @@ describe("server: reader integration (C1/C6)", () => {
       expect(chat!.attrs["gen_ai.usage.total_tokens"]).toBe(162);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("server: per-session git cwd (C4)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("runs git detection against the session's _aiobs cwd, not process.cwd()", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "c4-repo-"));
+    const branch = "aiobs-c4-branch";
+    try {
+      const g = (args: string[]) =>
+        execFileSync("git", ["-C", repo, ...args], { stdio: ["ignore", "pipe", "ignore"] });
+      g(["init", "-q"]);
+      g(["config", "user.email", "t@t.t"]);
+      g(["config", "user.name", "t"]);
+      g(["checkout", "-q", "-b", branch]);
+      g(["commit", "-q", "--allow-empty", "-m", "init"]);
+
+      await postHook(port, {
+        hook_event_name: "SessionStart",
+        session_id: "c4",
+        _aiobs: { context: { cwd: repo } },
+      });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "c4", prompt: "hi" });
+
+      const turn = sentry.spans.find(
+        (s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true,
+      );
+      expect(turn).toBeTruthy();
+      expect(turn!.attrs["vcs.ref.head.name"]).toBe(branch);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 });

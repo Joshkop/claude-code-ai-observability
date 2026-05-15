@@ -141,7 +141,12 @@ export function startServer(
 
   const handleSessionStart = async (event: SessionStartEvent): Promise<void> => {
     if (sessions.has(event.session_id)) return;
-    const detected = await detectContext(event.session_id).catch(() => ({} as AutoTags));
+    // C4: derive git/cwd from the session's own cwd (sent live by the
+    // hook-client), never the long-lived collector's process.cwd().
+    const sessionCwd = event._aiobs?.context?.cwd;
+    const detected = await detectContext(event.session_id, sessionCwd).catch(
+      () => ({} as AutoTags),
+    );
     const autoTags: AutoTags = {
       ...baseAutoTags,
       ...detected,
