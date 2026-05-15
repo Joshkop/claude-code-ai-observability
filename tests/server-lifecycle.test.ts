@@ -355,3 +355,42 @@ describe("server: dropped attr + heartbeat (R3/R4)", () => {
     expect(hb!.attrs["claude_code.collector.version"]).toBeDefined();
   });
 });
+
+describe("server: MCP + Skill tool attribution (N1/N2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("sets gen_ai.tool.mcp.* + claude_code.tool.source on an MCP tool span (N1)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x" });
+    await postHook(port, { hook_event_name: "PreToolUse", session_id: "s", tool_name: "mcp__claude_ai_Linear__list_issues", tool_use_id: "t1", tool_input: {} });
+    const toolSpan = sentry.spans.find((s) => s.attrs["gen_ai.tool.name"] === "mcp__claude_ai_Linear__list_issues");
+    expect(toolSpan).toBeTruthy();
+    expect(toolSpan!.attrs["gen_ai.tool.mcp.server"]).toBe("claude_ai_Linear");
+    expect(toolSpan!.attrs["gen_ai.tool.mcp.name"]).toBe("list_issues");
+    expect(toolSpan!.attrs["claude_code.tool.source"]).toBe("mcp");
+  });
+
+  it("sets claude_code.skill.name/plugin on a Skill tool span (N2)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s2" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s2", prompt: "x" });
+    await postHook(port, { hook_event_name: "PreToolUse", session_id: "s2", tool_name: "Skill", tool_use_id: "t2", tool_input: { skill: "superpowers:brainstorming" } });
+    const toolSpan = sentry.spans.find((s) => s.attrs["gen_ai.tool.name"] === "Skill");
+    expect(toolSpan).toBeTruthy();
+    expect(toolSpan!.attrs["claude_code.skill.name"]).toBe("brainstorming");
+    expect(toolSpan!.attrs["claude_code.skill.plugin"]).toBe("superpowers");
+  });
+});

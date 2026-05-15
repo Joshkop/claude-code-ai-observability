@@ -8,6 +8,7 @@ import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } 
 import { computeCost, loadPriceTable } from "./cost.js";
 import { applyToolError, captureBreadcrumb, captureDroppedBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
+import { parseMcpTool, parseSkillInput } from "./attribution.js";
 import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 const FLUSH_INTERVAL_MS = 30_000;
@@ -303,6 +304,28 @@ export function startServer(sentry, config, baseAutoTags) {
         record.toolCount += 1;
         record.turnToolCount += 1;
         record.turnTools.add(event.tool_name);
+        // N1: MCP server attribution on every tool span.
+        const mcp = parseMcpTool(event.tool_name);
+        if (mcp) {
+            try {
+                span.setAttribute("gen_ai.tool.mcp.server", mcp.server);
+                span.setAttribute("gen_ai.tool.mcp.name", mcp.name);
+                span.setAttribute("claude_code.tool.source", "mcp");
+            }
+            catch { /* ignore */ }
+        }
+        // N2: Skill tool input → skill name/plugin on the tool span.
+        if (event.tool_name === "Skill") {
+            const skill = parseSkillInput(event.tool_input);
+            if (skill) {
+                try {
+                    span.setAttribute("claude_code.skill.name", skill.name);
+                    if (skill.plugin)
+                        span.setAttribute("claude_code.skill.plugin", skill.plugin);
+                }
+                catch { /* ignore */ }
+            }
+        }
     };
     const handlePostTool = (event) => {
         const record = getOrCreateSession(event);
