@@ -55,3 +55,17 @@ describe("readTranscript — turn segmentation (C1)", () => {
     expect(selectTurn(r, undefined, 0)!.promptId).toBe("p1");
   });
 });
+
+describe("readTranscript — missing/empty file is not parse-degraded", () => {
+  it("missing file → empty turns, degraded false (not format drift)", () => {
+    const r = readTranscript("/tmp/__aiobs_no_such_transcript__.jsonl");
+    expect(r.turns).toEqual([]);
+    expect(r.degraded).toBe(false);
+  });
+  it("empty file → empty turns, degraded false", () => {
+    const p = make("");
+    const r = readTranscript(p);
+    expect(r.turns).toEqual([]);
+    expect(r.degraded).toBe(false);
+  });
+});

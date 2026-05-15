@@ -25,6 +25,7 @@ export interface TranscriptReadResult {
   session: SessionDimensions;
 }
 
+// Dual camelCase/snake_case fields tolerate both Claude Code serialisations.
 interface Line {
   type?: string;
   isSidechain?: boolean;
@@ -93,6 +94,8 @@ function collectSessionDims(l: Line, into: SessionDimensions): void {
 }
 
 function legacyResult(path: string, reason: string): TranscriptReadResult {
+  // Rare degraded fallback re-reads by path: transcript.ts is intentionally
+  // unchanged this release; fails safe to [] if the file vanished meanwhile.
   const turns = extractPerTurnTokens(path).map<RealTurn>((t) => ({ ...t, promptId: null }));
   return {
     turns,
@@ -108,6 +111,9 @@ export function readTranscript(path: string): TranscriptReadResult {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
+    // Missing/not-yet-flushed transcript is normal, not JSONL format drift —
+    // keep degraded=false so claude_code.transcript.parse_degraded stays
+    // reserved for genuine schema drift (spec C6).
     return { turns: [], byPromptId: new Map(), degraded: false, session: {} };
   }
 
