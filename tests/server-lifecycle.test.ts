@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startServer } from "../src/server.js";
 import type { AutoTags, ResolvedPluginConfig } from "../src/types.js";
 
@@ -185,5 +188,43 @@ describe("server lifecycle: per-turn transaction model", () => {
   it("SessionStart alone creates no span", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sess-only-start" });
     expect(sentry.spans).toHaveLength(0);
+  });
+});
+
+describe("server: reader integration (C1/C6)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("attributes tokens to one turn despite tool_result user lines (C1)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-c1-"));
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, [
+      JSON.stringify({ type: "user", promptId: "P1", message: { content: "go" } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 100, output_tokens: 50 } } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 8, output_tokens: 4 } } }),
+    ].join("\n"), "utf8");
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1" });
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
+    const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
+    expect(chat).toBeTruthy();
+    // total = (100+8) input + (50+4) output = 162 (one real turn, not split)
+    expect(chat!.attrs["gen_ai.usage.total_tokens"]).toBe(162);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

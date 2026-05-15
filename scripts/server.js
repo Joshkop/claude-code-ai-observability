@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { reportPluginError } from "./sentry-errors.js";
 import { closeTurnSpan, createToolSpan, openTurnTransaction, } from "./spans.js";
-import { extractPerTurnTokens } from "./transcript.js";
+import { readTranscript, selectTurn } from "./transcript-reader.js";
 import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
@@ -113,6 +113,8 @@ export function startServer(sentry, config, baseAutoTags) {
             transcriptPath: event.transcript_path,
             model: event.model,
             turnIndex: -1,
+            currentPromptId: null,
+            synthesized: false,
             autoTags,
             lastEventAt: Date.now(),
         });
@@ -145,9 +147,13 @@ export function startServer(sentry, config, baseAutoTags) {
             prompt: null,
             response: null,
         };
+        let parseDegraded = false;
+        let sessionDims = {};
         if (record.transcriptPath) {
-            const turns = extractPerTurnTokens(record.transcriptPath);
-            const turn = turns[record.turnIndex];
+            const result = readTranscript(record.transcriptPath);
+            parseDegraded = result.degraded;
+            sessionDims = result.session;
+            const turn = selectTurn(result, record.currentPromptId, record.turnIndex);
             if (turn)
                 tokens = turn;
         }
@@ -160,6 +166,27 @@ export function startServer(sentry, config, baseAutoTags) {
             cacheCreationTokens: tokens.cacheCreationTokens,
             outputTokens: tokens.outputTokens,
         }, priceTable);
+        try {
+            if (cost.unpricedModel) {
+                record.currentTurnSpan.setAttribute("claude_code.cost.unpriced_model", cost.unpricedModel);
+            }
+            if (parseDegraded) {
+                record.currentTurnSpan.setAttribute("claude_code.transcript.parse_degraded", true);
+            }
+            if (record.synthesized) {
+                record.currentTurnSpan.setAttribute("claude_code.session.synthesized", true);
+            }
+            if (sessionDims.permissionMode) {
+                record.currentTurnSpan.setAttribute("claude_code.permission_mode", sessionDims.permissionMode);
+            }
+            if (sessionDims.agentName) {
+                record.currentTurnSpan.setAttribute("claude_code.agent_name", sessionDims.agentName);
+            }
+            if (sessionDims.entrypoint) {
+                record.currentTurnSpan.setAttribute("claude_code.entrypoint", sessionDims.entrypoint);
+            }
+        }
+        catch { /* ignore */ }
         closeTurnSpan(sentry, record.currentTurnSpan, {
             tokens,
             responseModel: record.responseModel ?? record.model,
@@ -173,6 +200,7 @@ export function startServer(sentry, config, baseAutoTags) {
         }, config);
         record.currentTurnSpan = null;
         record.currentTurnStart = null;
+        record.currentPromptId = null;
         record.turnToolCount = 0;
         record.turnSubagentCount = 0;
         record.turnTools.clear();
@@ -183,6 +211,7 @@ export function startServer(sentry, config, baseAutoTags) {
             return;
         closeCurrentTurn(record);
         record.turnIndex += 1;
+        record.currentPromptId = event.prompt_id ?? null;
         const prompt = event.prompt ?? event.message ?? null;
         record.currentTurnStart = Date.now() / 1000;
         record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);

@@ -19,7 +19,7 @@ import {
   openTurnTransaction,
   type CloseTurnInput,
 } from "./spans.js";
-import { extractPerTurnTokens } from "./transcript.js";
+import { readTranscript, selectTurn } from "./transcript-reader.js";
 import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
@@ -49,6 +49,10 @@ interface SessionRecord {
   model?: string;
   responseModel?: string;
   turnIndex: number;
+  /** C1: promptId of the currently-open turn, from UserPromptSubmit. */
+  currentPromptId: string | null;
+  /** R2: true when this record was synthesized (SessionStart missed). */
+  synthesized: boolean;
   autoTags: AutoTags;
   lastEventAt: number;
 }
@@ -160,6 +164,8 @@ export function startServer(
       transcriptPath: event.transcript_path,
       model: event.model,
       turnIndex: -1,
+      currentPromptId: null,
+      synthesized: false,
       autoTags,
       lastEventAt: Date.now(),
     });
@@ -187,9 +193,13 @@ export function startServer(
       prompt: null,
       response: null,
     };
+    let parseDegraded = false;
+    let sessionDims: { permissionMode?: string; agentName?: string; entrypoint?: string } = {};
     if (record.transcriptPath) {
-      const turns = extractPerTurnTokens(record.transcriptPath);
-      const turn = turns[record.turnIndex];
+      const result = readTranscript(record.transcriptPath);
+      parseDegraded = result.degraded;
+      sessionDims = result.session;
+      const turn = selectTurn(result, record.currentPromptId, record.turnIndex);
       if (turn) tokens = turn;
     }
     if (tokens.model) record.responseModel = tokens.model;
@@ -203,6 +213,26 @@ export function startServer(
       },
       priceTable,
     );
+    try {
+      if (cost.unpricedModel) {
+        record.currentTurnSpan.setAttribute("claude_code.cost.unpriced_model", cost.unpricedModel);
+      }
+      if (parseDegraded) {
+        record.currentTurnSpan.setAttribute("claude_code.transcript.parse_degraded", true);
+      }
+      if (record.synthesized) {
+        record.currentTurnSpan.setAttribute("claude_code.session.synthesized", true);
+      }
+      if (sessionDims.permissionMode) {
+        record.currentTurnSpan.setAttribute("claude_code.permission_mode", sessionDims.permissionMode);
+      }
+      if (sessionDims.agentName) {
+        record.currentTurnSpan.setAttribute("claude_code.agent_name", sessionDims.agentName);
+      }
+      if (sessionDims.entrypoint) {
+        record.currentTurnSpan.setAttribute("claude_code.entrypoint", sessionDims.entrypoint);
+      }
+    } catch { /* ignore */ }
     closeTurnSpan(
       sentry,
       record.currentTurnSpan,
@@ -221,6 +251,7 @@ export function startServer(
     );
     record.currentTurnSpan = null;
     record.currentTurnStart = null;
+    record.currentPromptId = null;
     record.turnToolCount = 0;
     record.turnSubagentCount = 0;
     record.turnTools.clear();
@@ -231,6 +262,7 @@ export function startServer(
     if (!record) return;
     closeCurrentTurn(record);
     record.turnIndex += 1;
+    record.currentPromptId = event.prompt_id ?? null;
     const prompt = event.prompt ?? event.message ?? null;
     record.currentTurnStart = Date.now() / 1000;
     record.currentTurnSpan = openTurnTransaction(
