@@ -4,6 +4,7 @@ import type * as Sentry from "@sentry/node";
 import type { HookEvent, PreToolUseEvent, PostToolUseEvent } from "./types.js";
 import { scrubString } from "./serialize.js";
 import { extractSidechainUsage, type SidechainUsage } from "./transcript.js";
+import { deriveSubagentSource } from "./attribution.js";
 
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 type SentryLike = typeof Sentry;
@@ -89,6 +90,16 @@ export function createSubagentSpan(
   if (prompt) attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
   if (event.tool_use_id) attributes["gen_ai.tool.call.id"] = event.tool_use_id;
 
+  const src = deriveSubagentSource(subagentType, undefined);
+  attributes["claude_code.subagent.source"] = src.source;
+  if (src.inferred) attributes["claude_code.subagent.source_inferred"] = "true";
+  if (subagentType) attributes["claude_code.subagent.name"] = subagentType;
+  if (description) {
+    attributes["claude_code.subagent.description"] = scrubString(
+      truncate(description, maxAttrLen),
+    );
+  }
+
   const startSpan = (sentry as unknown as {
     startInactiveSpan?: (opts: unknown) => Span;
   }).startInactiveSpan;
@@ -143,6 +154,12 @@ export function attachSubagentToEvent(
       parentSpan: enclosing?.span ?? options.parent,
       depth: enclosing ? enclosing.depth + 1 : 0,
     });
+    try {
+      span.setAttribute(
+        "claude_code.subagent.depth",
+        enclosing ? enclosing.depth + 1 : 0,
+      );
+    } catch { /* ignore */ }
     return true;
   }
 
@@ -175,6 +192,8 @@ export function attachSubagentToEvent(
     } else {
       trySetStatus(entry.span, "ok");
     }
+    trySetAttribute(entry.span, "claude_code.subagent.duration_ms", Date.now() - entry.startedAt);
+    trySetAttribute(entry.span, "claude_code.subagent.error", post.tool_error === true);
     tryEnd(entry.span);
     return true;
   }

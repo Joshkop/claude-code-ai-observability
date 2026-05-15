@@ -364,3 +364,38 @@ describe("C5/N5 — per-session isolation + name/description match", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("N3 — subagent telemetry on the wrapper", () => {
+  it("sets agent name/description/source + depth on the wrapper span", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-n3-"));
+    const subDir = join(dir, "sess", "subagents");
+    mkdirSync(subDir, { recursive: true });
+    const tx = join(subDir, "agent-z.jsonl");
+    writeFileSync(
+      tx,
+      [
+        JSON.stringify({ type: "user", isSidechain: true, timestamp: "2026-05-15T00:00:00Z", message: { content: "go" } }),
+        JSON.stringify({ type: "assistant", isSidechain: true, timestamp: "2026-05-15T00:00:01Z", message: { model: "claude-opus-4-7", usage: { input_tokens: 5, output_tokens: 2 } } }),
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(join(subDir, "agent-z.meta.json"), JSON.stringify({ agentType: "explorer", name: "explorer", description: "scout" }), "utf8");
+
+    const sentry = makeFakeSentry();
+    const session = createSubagentSession();
+    const parentTranscriptPath = join(dir, "sess.jsonl");
+    const pre: PreToolUseEvent = {
+      hook_event_name: "PreToolUse", session_id: "sess", tool_name: "Task", tool_use_id: "tu",
+      tool_input: { subagent_type: "superpowers:planner", description: "scout", prompt: "p" },
+    };
+    attachSubagentToEvent(sentry as never, session, pre, { parentTranscriptPath });
+    attachSubagentToEvent(sentry as never, session, { hook_event_name: "PostToolUse", session_id: "sess", tool_name: "Task", tool_use_id: "tu" } as PostToolUseEvent, { parentTranscriptPath });
+
+    const wrapper = sentry.spans.find((s) => s.attrs["gen_ai.operation.name"] === "invoke_agent")!;
+    expect(wrapper.attrs["gen_ai.agent.name"]).toBe("superpowers:planner");
+    expect(wrapper.attrs["claude_code.subagent.source"]).toBe("plugin:superpowers");
+    expect(wrapper.attrs["claude_code.subagent.source_inferred"]).toBeUndefined();
+    expect(wrapper.attrs["claude_code.subagent.depth"]).toBe(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

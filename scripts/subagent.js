@@ -2,6 +2,7 @@ import path from "node:path";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { scrubString } from "./serialize.js";
 import { extractSidechainUsage } from "./transcript.js";
+import { deriveSubagentSource } from "./attribution.js";
 export function createSubagentSession() {
     return { active: new Map() };
 }
@@ -48,6 +49,15 @@ export function createSubagentSpan(sentry, event, options = {}) {
         attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
     if (event.tool_use_id)
         attributes["gen_ai.tool.call.id"] = event.tool_use_id;
+    const src = deriveSubagentSource(subagentType, undefined);
+    attributes["claude_code.subagent.source"] = src.source;
+    if (src.inferred)
+        attributes["claude_code.subagent.source_inferred"] = "true";
+    if (subagentType)
+        attributes["claude_code.subagent.name"] = subagentType;
+    if (description) {
+        attributes["claude_code.subagent.description"] = scrubString(truncate(description, maxAttrLen));
+    }
     const startSpan = sentry.startInactiveSpan;
     if (typeof startSpan !== "function")
         return null;
@@ -96,6 +106,10 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
             parentSpan: enclosing?.span ?? options.parent,
             depth: enclosing ? enclosing.depth + 1 : 0,
         });
+        try {
+            span.setAttribute("claude_code.subagent.depth", enclosing ? enclosing.depth + 1 : 0);
+        }
+        catch { /* ignore */ }
         return true;
     }
     if (event.hook_event_name === "PostToolUse") {
@@ -131,6 +145,8 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
         else {
             trySetStatus(entry.span, "ok");
         }
+        trySetAttribute(entry.span, "claude_code.subagent.duration_ms", Date.now() - entry.startedAt);
+        trySetAttribute(entry.span, "claude_code.subagent.error", post.tool_error === true);
         tryEnd(entry.span);
         return true;
     }
