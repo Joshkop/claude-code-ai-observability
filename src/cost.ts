@@ -54,8 +54,11 @@ export function resolveModelPrice(
   if (stripped !== model && table[stripped]) return table[stripped];
 
   for (const k of Object.keys(table)) {
-    if (model === k || model.startsWith(k + "-")) return table[k];
-    if (stripped === k || stripped.startsWith(k + "-")) return table[k];
+    // stripped (date-removed) prefix is more specific — check it first
+    if (stripped.startsWith(k + "-")) return table[k];
+  }
+  for (const k of Object.keys(table)) {
+    if (model.startsWith(k + "-")) return table[k];
   }
 
   const fam = familyOf(model);
@@ -63,8 +66,10 @@ export function resolveModelPrice(
     for (const [k, v] of Object.entries(table)) {
       if (k.includes(fam)) return v;
     }
-    const def = DEFAULT_PRICE_TABLE[FAMILY_DEFAULT_KEY[fam]];
-    if (def) return def;
+    // Prefer the family default from the caller's table; only then the
+    // built-in default (spec C3: family maps to the "default entry").
+    const key = FAMILY_DEFAULT_KEY[fam];
+    return table[key] ?? DEFAULT_PRICE_TABLE[key] ?? null;
   }
   return null;
 }

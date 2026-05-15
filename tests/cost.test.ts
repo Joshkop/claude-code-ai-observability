@@ -218,13 +218,14 @@ describe("C3 — tiered model resolution", () => {
     expect(resolveModelPrice("claude-opus-4-7", DEFAULT_PRICE_TABLE)!.input).toBe(15);
   });
 
-  it("date-suffixed model resolves via prefix", () => {
+  it("date-suffixed model resolves after stripping the date suffix", () => {
     const e = resolveModelPrice("claude-opus-4-7-20260101", DEFAULT_PRICE_TABLE);
     expect(e!.input).toBe(15);
   });
 
   it("family heuristic maps unknown sonnet to the sonnet default", () => {
     const e = resolveModelPrice("claude-sonnet-9-9-experimental", DEFAULT_PRICE_TABLE);
+    // no key prefixes this model, so the family branch must fire
     expect(e!.input).toBe(3);
   });
 
