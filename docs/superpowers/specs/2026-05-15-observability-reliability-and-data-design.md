@@ -113,6 +113,16 @@ the subagent `.meta.json` `name` + `description` against the captured tool_input
 (`description` / `prompt`) at PreToolUse. mtime and `agentType` become
 tiebreakers only. Removes mis-assignment when N same-type agents run parallel.
 
+### C6 — Soft-fail transcript parsing
+
+`transcript-reader` validates the JSONL shape it depends on (`promptId`,
+`isSidechain`, `tool_result` content, `.meta.json` keys, metadata line types).
+On an unrecognized/incompatible shape it does **not** silently emit wrong
+numbers: it falls back to the legacy positional behavior and sets
+`claude_code.transcript.parse_degraded = true` on affected turn spans (with a
+breadcrumb naming the failing expectation). Makes Claude Code JSONL format
+drift visible instead of silently corrupting accuracy.
+
 ## Reliability (Best-effort++)
 
 ### R1 — Retry-once + longer timeout
@@ -172,9 +182,20 @@ Per-subagent wrapper span gains: `gen_ai.agent.name` (type),
 `.meta.json`), tool count, duration, error flag, model, and
 `claude_code.subagent.depth` (nesting level), plus parent linkage.
 `claude_code.subagent.source = built-in | user | project | plugin:<name> |
-unknown`, derived from the agent definition path/namespace **only when
-derivable**. The owning plugin is **not fabricated** when Claude Code does not
-expose it — this limitation is intentional and documented.
+unknown`. Derivation order:
+
+1. Namespace in `subagent_type` / agent name (`plugin:agent`), if present.
+2. **Best-effort path inference:** resolve the agent definition file and test
+   whether it lives under a known plugin directory
+   (`~/.claude/plugins/**/<plugin>/agents/`, project `.claude/agents/`, user
+   `~/.claude/agents/`). The matched plugin/scope sets `source`.
+3. Otherwise `unknown`.
+
+When inference is used the span also carries
+`claude_code.subagent.source_inferred = true` so heuristic values are
+distinguishable from authoritative ones. Inference is explicitly best-effort:
+it may yield `unknown` or, rarely, a wrong plugin on non-standard layouts —
+the `source_inferred` flag exists precisely so consumers can discount it.
 
 ### N4 — Cheap session dimensions
 
@@ -209,12 +230,22 @@ TDD: every correctness fix gets a failing test encoding the bug first.
   `session.synthesized`; heartbeat emission.
 - **token-semantics** assertion — emitted `input_tokens` excludes
   cached/cache-write; `total_tokens` = full sum.
+- **C6 soft-fail** — malformed/unknown JSONL fixture → legacy fallback engaged
+  + `transcript.parse_degraded` set; well-formed fixture → flag absent.
+- **attribution.test.ts** also covers best-effort plugin path inference:
+  agent file under a plugin dir → `source = plugin:<name>` +
+  `source_inferred = true`; non-standard layout → `unknown`.
 
 ## Rollout & back-compat
 
 - **Behavior change callout:** C1 + C2 change the numbers existing dashboards
-  show (corrected, but shifted). CHANGELOG gets an explicit note; README gets a
+  show (corrected, but shifted). Values are corrected **in place** (no
+  parallel `_v2` attributes). CHANGELOG gets an explicit note; README gets a
   migration paragraph. Minor version bump.
+- **Dashboard migration guide** (new deliverable):
+  `docs/sentry-dashboard-migration.md` — the corrected attribute semantics,
+  updated Sentry queries/widget definitions for cost & token panels, and the
+  new attributes (N1–N5) so dashboards can be rebuilt quickly post-upgrade.
 - **Additive** (N1–N5, R3–R4) — no dashboard breakage.
 - **Single release**, sequenced internally correctness → reliability → new
   data, each layer independently revertable by commit.
@@ -223,5 +254,6 @@ TDD: every correctness fix gets a failing test encoding the bug first.
 ## Out of scope
 
 Durable spool / ack-based delivery; OTLP or non-Sentry export; historical
-backfill of corrected numbers; config UI; fabricating plugin names Claude Code
-does not expose; a prompt-recording toggle.
+backfill of corrected numbers; config UI; a prompt-recording toggle;
+**authoritative** subagent→plugin attribution (Claude Code exposes no such
+field — only best-effort path inference per N3, flagged `source_inferred`).
