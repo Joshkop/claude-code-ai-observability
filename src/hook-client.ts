@@ -422,8 +422,31 @@ if (isEntry) {
 }
 
 // ---------------------------------------------------------------------------
-// Temporary stubs — Task 11 (R3) replaces these with real implementations.
+// R3: persistent dropped-event counter
 // ---------------------------------------------------------------------------
-function readDroppedCount(): number { return 0; }
-function resetDroppedCount(): void { /* implemented in R3 (Task 11) */ }
-function incrementDroppedCount(): void { /* implemented in R3 (Task 11) */ }
+/** R3: path to the persistent dropped-event counter file. */
+export function _droppedCountPath(): string {
+  return join(CACHE_DIR, "dropped.count");
+}
+
+export function readDroppedCount(): number {
+  try {
+    const n = Number(readFileSync(_droppedCountPath(), "utf8").trim());
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function incrementDroppedCount(): void {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(_droppedCountPath(), String(readDroppedCount() + 1));
+  } catch {
+    // best-effort
+  }
+}
+
+export function resetDroppedCount(): void {
+  try { unlinkSync(_droppedCountPath()); } catch { /* ignore */ }
+}

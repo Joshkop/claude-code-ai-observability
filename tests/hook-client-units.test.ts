@@ -10,9 +10,9 @@
  * side effects in tests.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
-import { probeHealth, readPidFile, sendHookEvent } from "../src/hook-client.js";
+import { probeHealth, readPidFile, sendHookEvent, _droppedCountPath, readDroppedCount, incrementDroppedCount, resetDroppedCount } from "../src/hook-client.js";
 import { PID_FILE, CACHE_DIR, PLUGIN_VERSION } from "../src/plugin-meta.js";
 
 // ---------------------------------------------------------------------------
@@ -249,5 +249,21 @@ describe("R1 — sendHookEvent retry-once", () => {
       sendHookEvent({ hook_event_name: "Stop", session_id: "s" } as never, 19877),
     ).resolves.toBeUndefined();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("R3 — dropped-event counter round-trip", () => {
+  afterEach(() => {
+    try { rmSync(_droppedCountPath(), { force: true }); } catch { /* ignore */ }
+  });
+  it("increments and resets a persistent counter", () => {
+    resetDroppedCount();
+    expect(readDroppedCount()).toBe(0);
+    incrementDroppedCount();
+    incrementDroppedCount();
+    expect(readDroppedCount()).toBe(2);
+    resetDroppedCount();
+    expect(readDroppedCount()).toBe(0);
+    expect(existsSync(_droppedCountPath())).toBe(false);
   });
 });
