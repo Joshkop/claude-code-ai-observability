@@ -318,3 +318,40 @@ describe("server: lazy session synthesis (R2)", () => {
     }
   });
 });
+
+describe("server: dropped attr + heartbeat (R3/R4)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("records dropped_since_last on the open turn span (R3)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s" });
+    await postHook(port, {
+      hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x",
+      _aiobs: { dropped_since_last: 4 },
+    });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.dropped_since_last"]).toBe(4);
+  });
+
+  it("emitHeartbeat produces a claude_code.collector.heartbeat span (R4)", () => {
+    server.emitHeartbeat();
+    const hb = sentry.spans.find((s) => s.attrs["claude_code.collector.heartbeat"] === true);
+    expect(hb).toBeTruthy();
+    expect(typeof hb!.attrs["claude_code.collector.uptime_s"]).toBe("number");
+    expect(hb!.attrs["claude_code.collector.version"]).toBeDefined();
+  });
+});

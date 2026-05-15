@@ -23,7 +23,7 @@ import { readTranscript, selectTurn } from "./transcript-reader.js";
 import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
-import { applyToolError, captureBreadcrumb } from "./errors.js";
+import { applyToolError, captureBreadcrumb, captureDroppedBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
 import {
   CACHE_DIR,
@@ -133,8 +133,10 @@ export function startServer(
   sentry: typeof Sentry,
   config: ResolvedPluginConfig,
   baseAutoTags: AutoTags,
-): { close: () => Promise<void> } {
+): { close: () => Promise<void>; emitHeartbeat: () => void } {
   const sessions = new Map<string, SessionRecord>();
+  let droppedTotal = 0;
+  const startedAt = Date.now();
   const port = Number(process.env.SENTRY_COLLECTOR_PORT) || DEFAULT_PORT;
   const priceTable = loadPriceTable(null, config);
   const subagentSession = createSubagentSession();
@@ -321,6 +323,12 @@ export function startServer(
       config,
       record.model,
     );
+    const droppedNow = event._aiobs?.dropped_since_last;
+    if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
+      try {
+        record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
+      } catch { /* ignore */ }
+    }
   };
 
   const handlePreTool = (event: PreToolUseEvent): void => {
@@ -437,6 +445,23 @@ export function startServer(
     // Refresh dynamic tags from every event — tmux sessions can be renamed
     // and parent linkage may only become known after the first hook fires.
     applyClientContext(r.autoTags, event._aiobs?.context);
+    // R3: surface delivery loss the hook-client piggybacked on this event.
+    const dropped = event._aiobs?.dropped_since_last;
+    if (typeof dropped === "number" && dropped > 0) {
+      droppedTotal += dropped;
+      if (r.currentTurnSpan) {
+        try {
+          r.currentTurnSpan.setAttribute("claude_code.dropped_since_last", dropped);
+        } catch { /* ignore */ }
+      }
+      captureDroppedBreadcrumb(sentry, {
+        dropped,
+        session: {
+          sessionId: sid,
+          sessionName: r.autoTags["claude_code.session_name"],
+        },
+      });
+    }
   };
 
   async function handleEvent(event: HookEvent): Promise<void> {
@@ -462,8 +487,6 @@ export function startServer(
         return;
     }
   }
-
-  const startedAt = Date.now();
 
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
@@ -528,9 +551,28 @@ export function startServer(
   let flushTimer: NodeJS.Timeout | null = null;
   let reapTimer: NodeJS.Timeout | null = null;
 
+  const emitHeartbeat = (): void => {
+    try {
+      const span = sentry.startInactiveSpan({
+        op: "claude_code.collector.heartbeat",
+        name: "collector heartbeat",
+        forceTransaction: true,
+        attributes: {
+          "claude_code.collector.heartbeat": true,
+          "claude_code.collector.sessions_active": sessions.size,
+          "claude_code.collector.uptime_s": Math.floor((Date.now() - startedAt) / 1000),
+          "claude_code.collector.version": PLUGIN_VERSION,
+          "claude_code.collector.dropped_total": droppedTotal,
+        },
+      });
+      span.end();
+    } catch { /* ignore */ }
+  };
+
   server.on("listening", () => {
     writePidFile(port, startedAt);
     flushTimer = setInterval(() => {
+      emitHeartbeat();
       try { void sentry.flush(2000); } catch { /* ignore */ }
     }, FLUSH_INTERVAL_MS);
     flushTimer.unref?.();
@@ -581,5 +623,5 @@ export function startServer(
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
-  return { close: shutdown };
+  return { close: shutdown, emitHeartbeat };
 }
