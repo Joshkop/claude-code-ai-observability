@@ -218,13 +218,16 @@ describe("server: reader integration (C1/C6)", () => {
       JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } }),
       JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 8, output_tokens: 4 } } }),
     ].join("\n"), "utf8");
-    await postHook(port, { hook_event_name: "SessionStart", session_id: "s", transcript_path: tx });
-    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1" });
-    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
-    const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
-    expect(chat).toBeTruthy();
-    // total = (100+8) input + (50+4) output = 162 (one real turn, not split)
-    expect(chat!.attrs["gen_ai.usage.total_tokens"]).toBe(162);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      await postHook(port, { hook_event_name: "SessionStart", session_id: "s", transcript_path: tx });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1" });
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
+      const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
+      expect(chat).toBeTruthy();
+      // total = (100+8) input + (50+4) output = 162 (one real turn, not split)
+      expect(chat!.attrs["gen_ai.usage.total_tokens"]).toBe(162);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

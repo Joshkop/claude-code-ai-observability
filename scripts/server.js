@@ -153,6 +153,10 @@ export function startServer(sentry, config, baseAutoTags) {
             const result = readTranscript(record.transcriptPath);
             parseDegraded = result.degraded;
             sessionDims = result.session;
+            // promptId is the primary key; record.turnIndex is the ordinal fallback —
+            // it stays 1:1 with transcript-reader's real-turn index because each
+            // UserPromptSubmit corresponds to exactly one real (non-sidechain,
+            // non-tool_result) user line.
             const turn = selectTurn(result, record.currentPromptId, record.turnIndex);
             if (turn)
                 tokens = turn;
