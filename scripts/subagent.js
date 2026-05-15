@@ -49,6 +49,10 @@ export function createSubagentSpan(sentry, event, options = {}) {
         attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
     if (event.tool_use_id)
         attributes["gen_ai.tool.call.id"] = event.tool_use_id;
+    // Dual-namespaced on purpose: gen_ai.agent.* for generic OTel AI tooling,
+    // claude_code.subagent.* for plugin dashboards (no cross-namespace joins).
+    // `attributes` is string-only (span-construction map); depth/duration/error
+    // are set later via setAttribute as real number/boolean.
     const src = deriveSubagentSource(subagentType, undefined);
     attributes["claude_code.subagent.source"] = src.source;
     if (src.inferred)
@@ -93,6 +97,7 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
         const key = `${pre.session_id}::${pre.tool_use_id ?? session.active.size}`;
         const { subagentType, description, prompt } = readTaskInput(pre.tool_input);
         const subagentDir = computeSubagentDir(options.parentTranscriptPath, pre.session_id);
+        const depth = enclosing ? enclosing.depth + 1 : 0;
         session.active.set(key, {
             span,
             subagentType: subagentType ?? "subagent",
@@ -104,10 +109,10 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
             matchDescription: description,
             matchPrompt: prompt,
             parentSpan: enclosing?.span ?? options.parent,
-            depth: enclosing ? enclosing.depth + 1 : 0,
+            depth,
         });
         try {
-            span.setAttribute("claude_code.subagent.depth", enclosing ? enclosing.depth + 1 : 0);
+            span.setAttribute("claude_code.subagent.depth", depth);
         }
         catch { /* ignore */ }
         return true;

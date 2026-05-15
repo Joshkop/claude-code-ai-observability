@@ -396,6 +396,10 @@ describe("N3 — subagent telemetry on the wrapper", () => {
     expect(wrapper.attrs["claude_code.subagent.source"]).toBe("plugin:superpowers");
     expect(wrapper.attrs["claude_code.subagent.source_inferred"]).toBeUndefined();
     expect(wrapper.attrs["claude_code.subagent.depth"]).toBe(0);
+    expect(wrapper.attrs["claude_code.subagent.name"]).toBe("superpowers:planner");
+    expect(wrapper.attrs["claude_code.subagent.description"]).toBe("scout");
+    expect(typeof wrapper.attrs["claude_code.subagent.duration_ms"]).toBe("number");
+    expect(wrapper.attrs["claude_code.subagent.error"]).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 });
