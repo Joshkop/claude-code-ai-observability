@@ -241,7 +241,8 @@ function attachChatChild(sentry, wrapper, usage) {
     else {
         chat = create();
     }
-    trySetAttribute(chat, "gen_ai.usage.input_tokens", usage.inputTokens);
+    const nonCachedInput = Math.max(0, usage.inputTokens - usage.cachedInputTokens - usage.cacheCreationTokens);
+    trySetAttribute(chat, "gen_ai.usage.input_tokens", nonCachedInput);
     trySetAttribute(chat, "gen_ai.usage.output_tokens", usage.outputTokens);
     trySetAttribute(chat, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
     trySetAttribute(chat, "gen_ai.usage.input_tokens.cached", usage.cachedInputTokens);
@@ -269,7 +270,7 @@ function attachChatChild(sentry, wrapper, usage) {
         trySetAttribute(wrapper, "gen_ai.request.model", usage.model);
         trySetAttribute(wrapper, "gen_ai.response.model", usage.model);
     }
-    trySetAttribute(wrapper, "gen_ai.usage.input_tokens", usage.inputTokens);
+    trySetAttribute(wrapper, "gen_ai.usage.input_tokens", nonCachedInput);
     trySetAttribute(wrapper, "gen_ai.usage.output_tokens", usage.outputTokens);
     trySetAttribute(wrapper, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
 }

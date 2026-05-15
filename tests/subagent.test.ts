@@ -258,7 +258,7 @@ describe("attachSubagentToEvent — sidechain chat synthesis", () => {
       expect(sentry.spans.length).toBeGreaterThanOrEqual(2);
       const chat = sentry.spans[1];
       expect(chat.attrs["gen_ai.request.model"]).toBe("claude-sonnet-4-6");
-      expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(300); // 100 + 200
+      expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(100); // C2: non-cached input only (300 raw - 200 cache_read = 100)
       expect(chat.attrs["gen_ai.usage.output_tokens"]).toBe(50);
       expect(chat.attrs["gen_ai.usage.input_tokens.cached"]).toBe(200);
 
@@ -270,5 +270,43 @@ describe("attachSubagentToEvent — sidechain chat synthesis", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("C2 — subagent chat-child token semantics", () => {
+  it("subagent chat child emits non-cached input_tokens", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-c2-"));
+    const subDir = join(dir, "sess", "subagents");
+    mkdirSync(subDir, { recursive: true });
+    const tx = join(subDir, "agent-x.jsonl");
+    writeFileSync(
+      tx,
+      [
+        JSON.stringify({ type: "user", isSidechain: true, timestamp: "2026-05-15T00:00:00Z", message: { content: "go" } }),
+        JSON.stringify({ type: "assistant", isSidechain: true, timestamp: "2026-05-15T00:00:02Z", message: { model: "claude-opus-4-7", usage: { input_tokens: 50, output_tokens: 9, cache_creation_input_tokens: 10, cache_read_input_tokens: 20 } } }),
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(join(subDir, "agent-x.meta.json"), JSON.stringify({ agentType: "explorer" }), "utf8");
+
+    const sentry = makeFakeSentry();
+    const session = createSubagentSession();
+    const parentTranscriptPath = join(dir, "sess.jsonl");
+    const pre: PreToolUseEvent = {
+      hook_event_name: "PreToolUse", session_id: "sess", tool_name: "Task",
+      tool_use_id: "tu1", tool_input: { subagent_type: "explorer", description: "d", prompt: "p" },
+    };
+    attachSubagentToEvent(sentry as never, session, pre, { parentTranscriptPath });
+    const post: PostToolUseEvent = {
+      hook_event_name: "PostToolUse", session_id: "sess", tool_name: "Task", tool_use_id: "tu1",
+    };
+    attachSubagentToEvent(sentry as never, session, post, { parentTranscriptPath });
+
+    const chat = sentry.spans.find((s) => s.attrs["gen_ai.operation.name"] === "chat")!;
+    expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(50);
+    expect(chat.attrs["gen_ai.usage.input_tokens.cached"]).toBe(20);
+    expect(chat.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(10);
+    expect(chat.attrs["gen_ai.usage.total_tokens"]).toBe(80 + 9);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
