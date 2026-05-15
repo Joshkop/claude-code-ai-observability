@@ -212,10 +212,42 @@ export function startServer(sentry, config, baseAutoTags) {
         record.turnSubagentCount = 0;
         record.turnTools.clear();
     };
+    // R2: SessionStart can be missed (collector spawned mid-session or the
+    // event was dropped). Build a minimal record from the event so whole
+    // turns aren't blacked out. Spans get claude_code.session.synthesized.
+    const getOrCreateSession = (event) => {
+        const sid = event.session_id;
+        const existing = sessions.get(sid);
+        if (existing)
+            return existing;
+        const cwd = event._aiobs?.context?.cwd;
+        const transcriptPath = event.transcript_path;
+        const record = {
+            currentTurnSpan: null,
+            currentTurnStart: null,
+            pendingTools: new Map(),
+            toolCount: 0,
+            turnToolCount: 0,
+            turnSubagentCount: 0,
+            turnTools: new Set(),
+            transcriptPath,
+            model: undefined,
+            turnIndex: -1,
+            autoTags: {
+                ...baseAutoTags,
+                "claude_code.session_id": sid,
+                ...(cwd ? { "process.cwd": cwd } : {}),
+            },
+            lastEventAt: Date.now(),
+            currentPromptId: null,
+            synthesized: true,
+        };
+        applyClientContext(record.autoTags, event._aiobs?.context);
+        sessions.set(sid, record);
+        return record;
+    };
     const handleUserPrompt = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         closeCurrentTurn(record);
         record.turnIndex += 1;
         record.currentPromptId = event.prompt_id ?? null;
@@ -224,9 +256,7 @@ export function startServer(sentry, config, baseAutoTags) {
         record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
     };
     const handlePreTool = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         // Subagent tools can run for >30 min; keep the parent session fresh so the reaper
         // doesn't harvest it mid-flight. touchSession already bumped at the dispatcher,
         // but this is belt-and-suspenders in case the event shape ever loses session_id.
@@ -256,9 +286,7 @@ export function startServer(sentry, config, baseAutoTags) {
         record.turnTools.add(event.tool_name);
     };
     const handlePostTool = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         record.lastEventAt = Date.now();
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             maxAttrLen: config.maxAttributeLength,

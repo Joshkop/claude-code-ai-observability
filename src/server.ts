@@ -266,9 +266,42 @@ export function startServer(
     record.turnTools.clear();
   };
 
+  // R2: SessionStart can be missed (collector spawned mid-session or the
+  // event was dropped). Build a minimal record from the event so whole
+  // turns aren't blacked out. Spans get claude_code.session.synthesized.
+  const getOrCreateSession = (event: HookEvent): SessionRecord => {
+    const sid = (event as { session_id: string }).session_id;
+    const existing = sessions.get(sid);
+    if (existing) return existing;
+    const cwd = event._aiobs?.context?.cwd;
+    const transcriptPath = (event as { transcript_path?: string }).transcript_path;
+    const record: SessionRecord = {
+      currentTurnSpan: null,
+      currentTurnStart: null,
+      pendingTools: new Map(),
+      toolCount: 0,
+      turnToolCount: 0,
+      turnSubagentCount: 0,
+      turnTools: new Set(),
+      transcriptPath,
+      model: undefined,
+      turnIndex: -1,
+      autoTags: {
+        ...baseAutoTags,
+        "claude_code.session_id": sid,
+        ...(cwd ? { "process.cwd": cwd } : {}),
+      },
+      lastEventAt: Date.now(),
+      currentPromptId: null,
+      synthesized: true,
+    };
+    applyClientContext(record.autoTags, event._aiobs?.context);
+    sessions.set(sid, record);
+    return record;
+  };
+
   const handleUserPrompt = (event: UserPromptSubmitEvent): void => {
-    const record = sessions.get(event.session_id);
-    if (!record) return;
+    const record = getOrCreateSession(event);
     closeCurrentTurn(record);
     record.turnIndex += 1;
     record.currentPromptId = event.prompt_id ?? null;
@@ -286,8 +319,7 @@ export function startServer(
   };
 
   const handlePreTool = (event: PreToolUseEvent): void => {
-    const record = sessions.get(event.session_id);
-    if (!record) return;
+    const record = getOrCreateSession(event);
     // Subagent tools can run for >30 min; keep the parent session fresh so the reaper
     // doesn't harvest it mid-flight. touchSession already bumped at the dispatcher,
     // but this is belt-and-suspenders in case the event shape ever loses session_id.
@@ -328,8 +360,7 @@ export function startServer(
   };
 
   const handlePostTool = (event: PostToolUseEvent): void => {
-    const record = sessions.get(event.session_id);
-    if (!record) return;
+    const record = getOrCreateSession(event);
     record.lastEventAt = Date.now();
     if (
       attachSubagentToEvent(sentry, subagentSession, event, {

@@ -280,3 +280,41 @@ describe("server: per-session git cwd (C4)", () => {
     }
   });
 });
+
+describe("server: lazy session synthesis (R2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("emits a turn even when SessionStart was missed, flagged synthesized", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-r2-"));
+    const tx = join(dir, "s.jsonl");
+    try {
+      writeFileSync(tx, [
+        JSON.stringify({ type: "user", promptId: "P1", message: { content: "go" } }),
+        JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 9, output_tokens: 3 } } }),
+      ].join("\n"), "utf8");
+      // NOTE: NO SessionStart dispatched.
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1", _aiobs: { context: { cwd: dir } } });
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
+      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      expect(turn).toBeTruthy();
+      expect(turn!.attrs["claude_code.session.synthesized"]).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
