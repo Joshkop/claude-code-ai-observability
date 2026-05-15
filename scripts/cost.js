@@ -4,6 +4,53 @@ export const DEFAULT_PRICE_TABLE = {
     "claude-sonnet-4-6": { input: 3, cacheCreation: 3.75, cacheRead: 0.3, output: 15 },
     "claude-haiku-4-5-20251001": { input: 1, cacheCreation: 1.25, cacheRead: 0.1, output: 5 },
 };
+const FAMILY_DEFAULT_KEY = {
+    opus: "claude-opus-4-7",
+    sonnet: "claude-sonnet-4-6",
+    haiku: "claude-haiku-4-5-20251001",
+};
+function familyOf(model) {
+    const s = model.toLowerCase();
+    if (s.includes("opus"))
+        return "opus";
+    if (s.includes("sonnet"))
+        return "sonnet";
+    if (s.includes("haiku"))
+        return "haiku";
+    return null;
+}
+/**
+ * C3: exact key → strip trailing -YYYYMMDD → table key is a prefix →
+ * family heuristic → null (unpriced).
+ */
+export function resolveModelPrice(model, table = DEFAULT_PRICE_TABLE) {
+    if (table[model])
+        return table[model];
+    const stripped = model.replace(/-\d{8}$/, "");
+    if (stripped !== model && table[stripped])
+        return table[stripped];
+    for (const k of Object.keys(table)) {
+        // stripped (date-removed) prefix is more specific — check it first
+        if (stripped.startsWith(k + "-"))
+            return table[k];
+    }
+    for (const k of Object.keys(table)) {
+        if (model.startsWith(k + "-"))
+            return table[k];
+    }
+    const fam = familyOf(model);
+    if (fam) {
+        for (const [k, v] of Object.entries(table)) {
+            if (k.includes(fam))
+                return v;
+        }
+        // Prefer the family default from the caller's table; only then the
+        // built-in default (spec C3: family maps to the "default entry").
+        const key = FAMILY_DEFAULT_KEY[fam];
+        return table[key] ?? DEFAULT_PRICE_TABLE[key] ?? null;
+    }
+    return null;
+}
 export function loadPriceTable(overrides, config) {
     const merged = { ...DEFAULT_PRICE_TABLE };
     const envRaw = process.env.CLAUDE_AIOBS_PRICE_OVERRIDES;
@@ -31,9 +78,9 @@ export function computeCost(input, table = DEFAULT_PRICE_TABLE) {
     const zero = { inputCost: 0, outputCost: 0, totalCost: 0 };
     if (!input || !input.model)
         return zero;
-    const price = table[input.model];
+    const price = resolveModelPrice(input.model, table);
     if (!price)
-        return zero;
+        return { ...zero, unpricedModel: input.model };
     const inputTokens = toNonNegInt(input.inputTokens);
     const cachedInputTokens = Math.min(toNonNegInt(input.cachedInputTokens), inputTokens);
     const cacheCreationTokens = Math.min(toNonNegInt(input.cacheCreationTokens), Math.max(0, inputTokens - cachedInputTokens));

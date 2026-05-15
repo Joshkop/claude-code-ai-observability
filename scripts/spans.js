@@ -56,12 +56,15 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
             ...(respModel ? { "gen_ai.response.model": respModel } : {}),
         },
     }));
-    chatSpan.setAttribute("gen_ai.usage.input_tokens", tokens.inputTokens);
+    // C2: Sentry's schema expects input_tokens = NON-cached input only, with
+    // cache-read and cache-write reported separately. tokens.inputTokens is the
+    // raw sum of all three input buckets, so subtract the two cache buckets.
+    const nonCachedInput = Math.max(0, tokens.inputTokens - tokens.cachedInputTokens - tokens.cacheCreationTokens);
+    chatSpan.setAttribute("gen_ai.usage.input_tokens", nonCachedInput);
     chatSpan.setAttribute("gen_ai.usage.output_tokens", tokens.outputTokens);
     chatSpan.setAttribute("gen_ai.usage.total_tokens", tokens.inputTokens + tokens.outputTokens);
     chatSpan.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cachedInputTokens);
     if (tokens.cacheCreationTokens) {
-        // Sentry-python's canonical name for Anthropic prompt-cache writes.
         chatSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
     }
     if (config.recordOutputs && response) {

@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startServer } from "../src/server.js";
 import type { AutoTags, ResolvedPluginConfig } from "../src/types.js";
 
@@ -185,5 +189,243 @@ describe("server lifecycle: per-turn transaction model", () => {
   it("SessionStart alone creates no span", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sess-only-start" });
     expect(sentry.spans).toHaveLength(0);
+  });
+});
+
+describe("server: reader integration (C1/C6)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("attributes tokens to one turn despite tool_result user lines (C1)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-c1-"));
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, [
+      JSON.stringify({ type: "user", promptId: "P1", message: { content: "go" } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 100, output_tokens: 50 } } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 8, output_tokens: 4 } } }),
+    ].join("\n"), "utf8");
+    try {
+      await postHook(port, { hook_event_name: "SessionStart", session_id: "s", transcript_path: tx });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1" });
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
+      const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
+      expect(chat).toBeTruthy();
+      // total = (100+8) input + (50+4) output = 162 (one real turn, not split)
+      expect(chat!.attrs["gen_ai.usage.total_tokens"]).toBe(162);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("server: per-session git cwd (C4)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("runs git detection against the session's _aiobs cwd, not process.cwd()", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "c4-repo-"));
+    const branch = "aiobs-c4-branch";
+    try {
+      const g = (args: string[]) =>
+        execFileSync("git", ["-C", repo, ...args], { stdio: ["ignore", "pipe", "ignore"] });
+      g(["init", "-q"]);
+      g(["config", "user.email", "t@t.t"]);
+      g(["config", "user.name", "t"]);
+      g(["checkout", "-q", "-b", branch]);
+      g(["commit", "-q", "--allow-empty", "-m", "init"]);
+
+      await postHook(port, {
+        hook_event_name: "SessionStart",
+        session_id: "c4",
+        _aiobs: { context: { cwd: repo } },
+      });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "c4", prompt: "hi" });
+
+      const turn = sentry.spans.find(
+        (s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true,
+      );
+      expect(turn).toBeTruthy();
+      expect(turn!.attrs["vcs.ref.head.name"]).toBe(branch);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("server: lazy session synthesis (R2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("emits a turn even when SessionStart was missed, flagged synthesized", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-r2-"));
+    const tx = join(dir, "s.jsonl");
+    try {
+      writeFileSync(tx, [
+        JSON.stringify({ type: "user", promptId: "P1", message: { content: "go" } }),
+        JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 9, output_tokens: 3 } } }),
+      ].join("\n"), "utf8");
+      // NOTE: NO SessionStart dispatched.
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1", _aiobs: { context: { cwd: dir } } });
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
+      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      expect(turn).toBeTruthy();
+      expect(turn!.attrs["claude_code.session.synthesized"]).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("server: dropped attr + heartbeat (R3/R4)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("records dropped_since_last on the open turn span (R3)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s" });
+    await postHook(port, {
+      hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x",
+      _aiobs: { dropped_since_last: 4 },
+    });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.dropped_since_last"]).toBe(4);
+  });
+
+  it("emitHeartbeat produces a claude_code.collector.heartbeat span (R4)", () => {
+    server.emitHeartbeat();
+    const hb = sentry.spans.find((s) => s.attrs["claude_code.collector.heartbeat"] === true);
+    expect(hb).toBeTruthy();
+    expect(typeof hb!.attrs["claude_code.collector.uptime_s"]).toBe("number");
+    expect(hb!.attrs["claude_code.collector.version"]).toBeDefined();
+  });
+});
+
+describe("server: MCP + Skill tool attribution (N1/N2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("sets gen_ai.tool.mcp.* + claude_code.tool.source on an MCP tool span (N1)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x" });
+    await postHook(port, { hook_event_name: "PreToolUse", session_id: "s", tool_name: "mcp__claude_ai_Linear__list_issues", tool_use_id: "t1", tool_input: {} });
+    const toolSpan = sentry.spans.find((s) => s.attrs["gen_ai.tool.name"] === "mcp__claude_ai_Linear__list_issues");
+    expect(toolSpan).toBeTruthy();
+    expect(toolSpan!.attrs["gen_ai.tool.mcp.server"]).toBe("claude_ai_Linear");
+    expect(toolSpan!.attrs["gen_ai.tool.mcp.name"]).toBe("list_issues");
+    expect(toolSpan!.attrs["claude_code.tool.source"]).toBe("mcp");
+  });
+
+  it("sets claude_code.skill.name/plugin on a Skill tool span (N2)", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s2" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s2", prompt: "x" });
+    await postHook(port, { hook_event_name: "PreToolUse", session_id: "s2", tool_name: "Skill", tool_use_id: "t2", tool_input: { skill: "superpowers:brainstorming" } });
+    const toolSpan = sentry.spans.find((s) => s.attrs["gen_ai.tool.name"] === "Skill");
+    expect(toolSpan).toBeTruthy();
+    expect(toolSpan!.attrs["claude_code.skill.name"]).toBe("brainstorming");
+    expect(toolSpan!.attrs["claude_code.skill.plugin"]).toBe("superpowers");
+  });
+});
+
+describe("server: slash-command attribution (N2)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let server: { close: () => Promise<void>; emitHeartbeat: () => void };
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    server = startServer(sentry as never, baseConfig, baseTags);
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await server.close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("sets claude_code.command.name/plugin from a namespaced command", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "sc" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc", prompt: "/superpowers:writing-plans go" });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.command.name"]).toBe("writing-plans");
+    expect(turn!.attrs["claude_code.command.plugin"]).toBe("superpowers");
+  });
+
+  it("does not set command attrs for a normal prompt", async () => {
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "sc2" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc2", prompt: "just a normal prompt" });
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    expect(turn).toBeTruthy();
+    expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
   });
 });

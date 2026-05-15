@@ -2,6 +2,7 @@ import path from "node:path";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { scrubString } from "./serialize.js";
 import { extractSidechainUsage } from "./transcript.js";
+import { deriveSubagentSource } from "./attribution.js";
 export function createSubagentSession() {
     return { active: new Map() };
 }
@@ -23,14 +24,12 @@ export function isSubagentInvocation(event) {
 export function findActiveSubagentSpan(session, sessionId) {
     if (!sessionId)
         return null;
-    // Map preserves insertion order — the last entry is the most recently
-    // started wrapper. Iterate to the end and keep that one. We don't filter
-    // by sessionId because the active map is collector-global and tool_use_id
-    // is unique across sessions; the dispatcher handles the per-session
-    // boundary by only looking up while a subagent is in flight.
     let latest = null;
-    for (const entry of session.active.values())
-        latest = entry;
+    for (const entry of session.active.values()) {
+        if (entry.sessionId !== sessionId)
+            continue;
+        latest = entry; // Map preserves insertion order; last match = most recent.
+    }
     return latest?.span ?? null;
 }
 export function createSubagentSpan(sentry, event, options = {}) {
@@ -50,6 +49,19 @@ export function createSubagentSpan(sentry, event, options = {}) {
         attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
     if (event.tool_use_id)
         attributes["gen_ai.tool.call.id"] = event.tool_use_id;
+    // Dual-namespaced on purpose: gen_ai.agent.* for generic OTel AI tooling,
+    // claude_code.subagent.* for plugin dashboards (no cross-namespace joins).
+    // `attributes` is string-only (span-construction map); depth/duration/error
+    // are set later via setAttribute as real number/boolean.
+    const src = deriveSubagentSource(subagentType, undefined);
+    attributes["claude_code.subagent.source"] = src.source;
+    if (src.inferred)
+        attributes["claude_code.subagent.source_inferred"] = "true";
+    if (subagentType)
+        attributes["claude_code.subagent.name"] = subagentType;
+    if (description) {
+        attributes["claude_code.subagent.description"] = scrubString(truncate(description, maxAttrLen));
+    }
     const startSpan = sentry.startInactiveSpan;
     if (typeof startSpan !== "function")
         return null;
@@ -70,12 +82,22 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
         return false;
     if (event.hook_event_name === "PreToolUse") {
         const pre = event;
-        const span = createSubagentSpan(sentry, pre, options);
+        // N5: nest under an already-active subagent for THIS session, if any.
+        const enclosing = findEnclosingActive(session, pre.session_id);
+        const span = createSubagentSpan(sentry, pre, {
+            ...options,
+            parent: enclosing?.span ?? options.parent,
+        });
         if (!span)
             return true;
-        const key = pre.tool_use_id ?? `${pre.session_id}:${session.active.size}`;
-        const { subagentType } = readTaskInput(pre.tool_input);
+        // Real Claude Code Task/Agent events always carry tool_use_id; the
+        // `?? size` fallback only sequences pathological no-id events. Two
+        // concurrent no-id subagents in one session would resolve FIFO at
+        // PostToolUse (findFirstKeyForSession) — acceptable for that edge.
+        const key = `${pre.session_id}::${pre.tool_use_id ?? session.active.size}`;
+        const { subagentType, description, prompt } = readTaskInput(pre.tool_input);
         const subagentDir = computeSubagentDir(options.parentTranscriptPath, pre.session_id);
+        const depth = enclosing ? enclosing.depth + 1 : 0;
         session.active.set(key, {
             span,
             subagentType: subagentType ?? "subagent",
@@ -83,12 +105,23 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
             preExisting: subagentDir ? listAgentFiles(subagentDir) : undefined,
             subagentDir,
             startedAt: Date.now(),
+            sessionId: pre.session_id,
+            matchDescription: description,
+            matchPrompt: prompt,
+            parentSpan: enclosing?.span ?? options.parent,
+            depth,
         });
+        try {
+            span.setAttribute("claude_code.subagent.depth", depth);
+        }
+        catch { /* ignore */ }
         return true;
     }
     if (event.hook_event_name === "PostToolUse") {
         const post = event;
-        const key = post.tool_use_id ?? findFirstKey(session.active);
+        const key = post.tool_use_id
+            ? findKeyByToolUse(session.active, post.session_id, post.tool_use_id)
+            : findFirstKeyForSession(session.active, post.session_id);
         if (!key)
             return true;
         const entry = session.active.get(key);
@@ -117,6 +150,8 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
         else {
             trySetStatus(entry.span, "ok");
         }
+        trySetAttribute(entry.span, "claude_code.subagent.duration_ms", Date.now() - entry.startedAt);
+        trySetAttribute(entry.span, "claude_code.subagent.error", post.tool_error === true);
         tryEnd(entry.span);
         return true;
     }
@@ -187,15 +222,25 @@ function locateSidechainUsage(entry) {
         catch {
             continue;
         }
+        // 5s back-window tolerates clock skew between PreToolUse and the
+        // sidechain file's first write; `search` already excludes preExisting
+        // files so this only guards the no-new-candidates fallback path.
         if (mtimeMs < entry.startedAt - 5_000)
-            continue; // not from this invocation
+            continue;
         const meta = readMeta(full);
+        const descMatch = !!entry.matchDescription &&
+            typeof meta?.description === "string" &&
+            meta.description === entry.matchDescription;
         const agentTypeMatch = typeof meta?.agentType === "string" && meta.agentType === entry.subagentType;
-        scored.push({ file: full, mtimeMs, agentTypeMatch });
+        scored.push({ file: full, mtimeMs, descMatch, agentTypeMatch });
     }
     if (!scored.length)
         return null;
     scored.sort((a, b) => {
+        // C5: exact description match is authoritative; agentType then mtime
+        // are tiebreakers only.
+        if (a.descMatch !== b.descMatch)
+            return a.descMatch ? -1 : 1;
         if (a.agentTypeMatch !== b.agentTypeMatch)
             return a.agentTypeMatch ? -1 : 1;
         return b.mtimeMs - a.mtimeMs;
@@ -241,7 +286,8 @@ function attachChatChild(sentry, wrapper, usage) {
     else {
         chat = create();
     }
-    trySetAttribute(chat, "gen_ai.usage.input_tokens", usage.inputTokens);
+    const nonCachedInput = Math.max(0, usage.inputTokens - usage.cachedInputTokens - usage.cacheCreationTokens);
+    trySetAttribute(chat, "gen_ai.usage.input_tokens", nonCachedInput);
     trySetAttribute(chat, "gen_ai.usage.output_tokens", usage.outputTokens);
     trySetAttribute(chat, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
     trySetAttribute(chat, "gen_ai.usage.input_tokens.cached", usage.cachedInputTokens);
@@ -269,7 +315,7 @@ function attachChatChild(sentry, wrapper, usage) {
         trySetAttribute(wrapper, "gen_ai.request.model", usage.model);
         trySetAttribute(wrapper, "gen_ai.response.model", usage.model);
     }
-    trySetAttribute(wrapper, "gen_ai.usage.input_tokens", usage.inputTokens);
+    trySetAttribute(wrapper, "gen_ai.usage.input_tokens", nonCachedInput);
     trySetAttribute(wrapper, "gen_ai.usage.output_tokens", usage.outputTokens);
     trySetAttribute(wrapper, "gen_ai.usage.total_tokens", usage.inputTokens + usage.outputTokens);
 }
@@ -296,9 +342,27 @@ function coerceErrorMessage(value, max) {
         return null;
     return scrubString(truncate(s, max));
 }
-function findFirstKey(m) {
-    const it = m.keys().next();
-    return it.done ? undefined : it.value;
+function findKeyByToolUse(m, sessionId, toolUseId) {
+    for (const [k, v] of m) {
+        if (v.sessionId === sessionId && v.toolUseId === toolUseId)
+            return k;
+    }
+    return undefined;
+}
+function findFirstKeyForSession(m, sessionId) {
+    for (const [k, v] of m) {
+        if (v.sessionId === sessionId)
+            return k;
+    }
+    return undefined;
+}
+function findEnclosingActive(session, sessionId) {
+    let latest = null;
+    for (const v of session.active.values()) {
+        if (v.sessionId === sessionId)
+            latest = v;
+    }
+    return latest;
 }
 function trySetStatus(span, status) {
     const fn = span.setStatus;

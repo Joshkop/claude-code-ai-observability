@@ -47,22 +47,40 @@ export async function probeHealth(port: number, timeoutMs = 500): Promise<Collec
 }
 
 export async function sendHookEvent(event: HookEvent, port: number): Promise<void> {
-  try {
-    // Enrich the event with hook-client-side context so the long-lived
-    // collector — whose env was frozen at *its* spawn time — uses the
-    // user's *live* tmux/screen session name, parent linkage, etc.
-    const enriched: HookEvent = {
-      ...event,
-      _aiobs: { context: detectClientContext() },
-    };
-    await fetch(`${baseUrl(port)}/hook`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(enriched),
-      signal: AbortSignal.timeout(500),
-    });
-  } catch {
-    // Realtime best-effort: never block the hook.
+  // R3: piggyback the count of events we previously failed to deliver, then
+  // optimistically reset; if THIS send also fails we re-increment below.
+  const droppedSinceLast = readDroppedCount();
+  const enriched: HookEvent = {
+    ...event,
+    _aiobs: {
+      context: detectClientContext(),
+      ...(droppedSinceLast > 0 ? { dropped_since_last: droppedSinceLast } : {}),
+    },
+  };
+  const body = JSON.stringify(enriched);
+
+  const attempt = async (): Promise<boolean> => {
+    try {
+      const res = await fetch(`${baseUrl(port)}/hook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        // R1: detached hook process; Claude Code is never blocked by this.
+        signal: AbortSignal.timeout(1000),
+      });
+      return !!res && (res.status ?? 200) < 500;
+    } catch {
+      return false;
+    }
+  };
+
+  let ok = await attempt();
+  if (!ok) ok = await attempt(); // R1: retry exactly once.
+
+  if (ok) {
+    if (droppedSinceLast > 0) resetDroppedCount();
+  } else {
+    incrementDroppedCount();
   }
 }
 
@@ -401,4 +419,34 @@ const isEntry = (() => {
 
 if (isEntry) {
   main().catch(() => process.exit(0));
+}
+
+// ---------------------------------------------------------------------------
+// R3: persistent dropped-event counter
+// ---------------------------------------------------------------------------
+/** R3: path to the persistent dropped-event counter file. */
+export function _droppedCountPath(): string {
+  return join(CACHE_DIR, "dropped.count");
+}
+
+export function readDroppedCount(): number {
+  try {
+    const n = Number(readFileSync(_droppedCountPath(), "utf8").trim());
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function incrementDroppedCount(): void {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(_droppedCountPath(), String(readDroppedCount() + 1));
+  } catch {
+    // best-effort
+  }
+}
+
+export function resetDroppedCount(): void {
+  try { unlinkSync(_droppedCountPath()); } catch { /* ignore */ }
 }
