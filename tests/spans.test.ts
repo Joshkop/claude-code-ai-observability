@@ -163,7 +163,7 @@ describe("closeTurnSpan attribute contract", () => {
 
     const chatSpan = sentry.spans[sentry.spans.length - 1];
     expect(chatSpan.attrs["gen_ai.operation.name"]).toBe("chat");
-    expect(chatSpan.attrs["gen_ai.usage.input_tokens"]).toBe(100); // C2: input_tokens is now non-cached input only
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens"]).toBe(150); // input_tokens is the full input including cached (Sentry schema)
     expect(chatSpan.attrs["gen_ai.usage.output_tokens"]).toBe(60);
     expect(chatSpan.attrs["gen_ai.usage.total_tokens"]).toBe(210);
     expect(chatSpan.attrs["gen_ai.usage.input_tokens.cached"]).toBe(30);
@@ -263,8 +263,8 @@ describe("closeTurnSpan attribute contract", () => {
   });
 });
 
-describe("C2 — emitted token semantics", () => {
-  it("input_tokens excludes cached + cache_write; total_tokens is the full sum", () => {
+describe("C2 — input_tokens includes cached (Sentry schema)", () => {
+  it("input_tokens is the full input including cached + cache_write; total_tokens is input + output", () => {
     const sentry = makeFakeSentry();
     const turnSpan = makeFakeSpan();
     const cfg = { recordInputs: false, recordOutputs: false, maxAttributeLength: 1000, tags: {} } as never;
@@ -281,7 +281,7 @@ describe("C2 — emitted token semantics", () => {
       cfg,
     );
     const chat = sentry.spans[sentry.spans.length - 1];
-    expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(70);
+    expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(100);
     expect(chat.attrs["gen_ai.usage.input_tokens.cached"]).toBe(20);
     expect(chat.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(10);
     expect(chat.attrs["gen_ai.usage.output_tokens"]).toBe(40);
