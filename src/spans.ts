@@ -101,14 +101,12 @@ export function closeTurnSpan(
       },
     }),
   );
-  // C2: Sentry's schema expects input_tokens = NON-cached input only, with
-  // cache-read and cache-write reported separately. tokens.inputTokens is the
-  // raw sum of all three input buckets, so subtract the two cache buckets.
-  const nonCachedInput = Math.max(
-    0,
-    tokens.inputTokens - tokens.cachedInputTokens - tokens.cacheCreationTokens,
-  );
-  chatSpan.setAttribute("gen_ai.usage.input_tokens", nonCachedInput);
+  // Sentry schema: gen_ai.usage.input_tokens is the FULL input INCLUDING
+  // cached tokens (cached is a subset). Sentry computes server-side cost as
+  // (input_tokens - cached) * rate + cached * cached_rate, so input_tokens
+  // MUST include cached or gen_ai.cost.* goes negative. tokens.inputTokens
+  // is already the full raw sum (non-cached + cache_read + cache_write).
+  chatSpan.setAttribute("gen_ai.usage.input_tokens", tokens.inputTokens);
   chatSpan.setAttribute("gen_ai.usage.output_tokens", tokens.outputTokens);
   chatSpan.setAttribute(
     "gen_ai.usage.total_tokens",

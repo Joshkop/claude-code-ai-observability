@@ -9,19 +9,17 @@ now-correct** numbers. Rebuild cost/token panels using the queries below.
 - **C1 — turn segmentation.** Per-turn token/cost is no longer mis-sliced by
   tool-result user lines. Per-turn totals differ from pre-0.2.0; session
   totals are unchanged in aggregate but correctly distributed.
-- **C2 — token semantics.** `gen_ai.usage.input_tokens` is now **non-cached
-  input only**. Cache read/write are reported separately:
-  - `gen_ai.usage.input_tokens` = non-cached input
-  - `gen_ai.usage.input_tokens.cached` = cache-read
-  - `gen_ai.usage.input_tokens.cache_write` = cache-creation
-  - `gen_ai.usage.total_tokens` = sum of all four buckets
-  Sentry's server-side cost + "Tokens Used" widget no longer double-count.
+- **Token semantics are unchanged and follow Sentry's schema:**
+  `gen_ai.usage.input_tokens` is the full input **including** cached tokens
+  (`gen_ai.usage.input_tokens.cached` is a subset); `gen_ai.usage.total_tokens`
+  = input + output. Sentry computes `gen_ai.cost.*` server-side from these —
+  no manual equation needed.
 
 ## Updated queries / widgets
 
 | Panel | Old | New |
 |-------|-----|-----|
-| Tokens Used | `sum(gen_ai.usage.input_tokens)` on `op:gen_ai.chat` (cache double-counted) | same query — value now excludes cache; add `gen_ai.usage.input_tokens.cached` + `.cache_write` series for the full picture |
+| Tokens Used | `sum(gen_ai.usage.input_tokens)` on `op:gen_ai.chat` | unchanged — `gen_ai.usage.input_tokens` includes cached per Sentry schema; Sentry's server-side cost is correct |
 | Cost (plugin) | `sum(conversation.cost_estimate_usd)` on `op:gen_ai.invoke_agent` | unchanged query; now correct per turn |
 | Unpriced models | n/a | `has:claude_code.cost.unpriced_model` → group by `claude_code.cost.unpriced_model` |
 | Parse degraded | n/a | `has:claude_code.transcript.parse_degraded` (alert if > 0) |
