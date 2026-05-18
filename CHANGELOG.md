@@ -11,9 +11,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **BREAKING (numbers, not API): per-turn token/cost is now correctly
   segmented (C1).** Tool-result user lines no longer start phantom turns;
   per-turn values shift to correct. See `docs/sentry-dashboard-migration.md`.
-- **`gen_ai.usage.input_tokens` is now non-cached input only (C2).**
-  Cache read/write are separate attributes; `total_tokens` is the full sum.
-  Sentry's server-side cost + Tokens Used widget no longer double-count.
 
 ### Fixed
 
