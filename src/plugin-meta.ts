@@ -16,8 +16,13 @@ function readVersion(): string {
 }
 
 export const PLUGIN_VERSION: string = readVersion();
-export const CACHE_DIR: string = join(homedir(), ".cache", "claude-code-ai-observability");
-export const PID_FILE: string = join(CACHE_DIR, "collector.pid");
+// CACHE_DIR is overridable so sandboxed/multi-tenant hosts (and parallel test
+// workers) can isolate the collector's pid/lock/counter files instead of
+// sharing one global path.
+export const CACHE_DIR: string =
+  process.env.CLAUDE_AIOBS_CACHE_DIR || join(homedir(), ".cache", "claude-code-ai-observability");
+export const PID_FILE: string =
+  process.env.CLAUDE_AIOBS_PID_FILE || join(CACHE_DIR, "collector.pid");
 
 export interface CollectorPidFile {
   pid: number;
