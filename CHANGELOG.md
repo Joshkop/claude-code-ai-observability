@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-05-18
+
+### Fixed
+
+- **`gen_ai.usage.input_tokens` now includes cached tokens, per Sentry's AI
+  Agents schema.** v0.2.0 emitted non-cached input only, which made Sentry's
+  server-side `gen_ai.cost.*` go negative (`(input_tokens - cached) * rate`
+  with `cached > input_tokens`). Cached/cache-write remain informational
+  subsets; `total_tokens` = input + output. No dashboard migration needed —
+  token semantics now match pre-0.2.0 and Sentry.
+- **Flaky CI:** parallel vitest workers shared one global
+  `~/.cache/.../collector.pid`, so real-server tests raced on it. `CACHE_DIR`
+  (and `PID_FILE`) are now overridable via `CLAUDE_AIOBS_CACHE_DIR` /
+  `CLAUDE_AIOBS_PID_FILE`; each test worker gets an isolated cache dir.
+
 ## [0.2.0] - 2026-05-15
 
 ### Changed (behavior — read the migration note)
