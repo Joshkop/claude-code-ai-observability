@@ -261,6 +261,44 @@ describe("closeTurnSpan attribute contract", () => {
 
     expect(turnSpan.attrs["conversation.cost_estimate_usd"]).toBeUndefined();
   });
+
+  it("sets gen_ai.agent.name=claude-code on the chat child", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "session-abc", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: makeTokens(),
+      sessionId: "session-abc",
+    }, baseConfig);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["gen_ai.agent.name"]).toBe("claude-code");
+  });
+
+  it("emits reasoning attrs on chat child when tokens.reasoningTokens > 0", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "session-abc", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: makeTokens({ reasoningTokens: 17, reasoningEstimated: true }),
+      sessionId: "session-abc",
+    }, baseConfig);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["gen_ai.usage.output_tokens.reasoning"]).toBe(17);
+    expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBe(true);
+  });
+
+  it("does not emit reasoning attrs when tokens.reasoningTokens missing", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(sentry as never, "session-abc", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: makeTokens(),
+      sessionId: "session-abc",
+    }, baseConfig);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["gen_ai.usage.output_tokens.reasoning"]).toBeUndefined();
+    expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBeUndefined();
+  });
 });
 
 describe("C2 — input_tokens includes cached (Sentry schema)", () => {
@@ -330,5 +368,22 @@ describe("createToolSpan parent behavior", () => {
     const span = createToolSpan(sentry as never, null, "Bash", undefined, baseConfig);
     const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
     expect(fake.attrs["gen_ai.tool.call.id"]).toBeUndefined();
+  });
+
+  it("sets gen_ai.conversation.id from sessionId", () => {
+    const sentry = makeFakeSentry();
+    const span = createToolSpan(
+      sentry as never,
+      null,
+      "Bash",
+      { command: "ls" },
+      baseConfig,
+      undefined,
+      "tool-use-id-1",
+      "session-xyz",
+    );
+    const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(fake.attrs["gen_ai.conversation.id"]).toBe("session-xyz");
+    span.end();
   });
 });

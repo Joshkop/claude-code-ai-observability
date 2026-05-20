@@ -1,14 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   attachSubagentToEvent,
   createSubagentSession,
+  createSubagentSpan,
   findActiveSubagentSpan,
   isSubagentInvocation,
 } from "../src/subagent.js";
 import type { PreToolUseEvent, PostToolUseEvent } from "../src/types.js";
+import * as transcriptMod from "../src/transcript.js";
 
 function makeFakeSpan() {
   const attrs: Record<string, unknown> = {};
@@ -169,6 +171,20 @@ describe("attachSubagentToEvent", () => {
     );
     expect(sentry.spans[0].attrs["gen_ai.agent.name"]).toBe("researcher");
   });
+
+  it("sets gen_ai.conversation.id from event.session_id on subagent span", () => {
+    const sentry = makeFakeSentry();
+    const span = createSubagentSpan(sentry as never, {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-1",
+      tool_name: "Task",
+      tool_use_id: "tu_1",
+      tool_input: { subagent_type: "researcher", prompt: "find X", description: "research" },
+    } as PreToolUseEvent);
+    expect(span).not.toBeNull();
+    expect(sentry.spans[0].attrs["gen_ai.conversation.id"]).toBe("sess-1");
+    expect(sentry.spans[0].attrs["gen_ai.agent.name"]).toBe("researcher");
+  });
 });
 
 describe("findActiveSubagentSpan", () => {
@@ -190,6 +206,62 @@ describe("findActiveSubagentSpan", () => {
     });
     const top = findActiveSubagentSpan(session, "sess-1");
     expect(top).toBe(sentry.spans[1]);
+  });
+});
+
+describe("attachSubagentToEvent — chat child attrs (conversation.id, agent.name, reasoning)", () => {
+  it("subagent chat child carries conversation.id, agent.name, reasoning", () => {
+    const root = mkdtempSync(join(tmpdir(), "aiobs-chat-child-"));
+    const spy = vi.spyOn(transcriptMod, "extractSidechainUsage").mockReturnValue({
+      inputTokens: 100, outputTokens: 50,
+      cachedInputTokens: 0, cacheCreationTokens: 0,
+      model: "claude-sonnet-4-6",
+      startTime: undefined, endTime: undefined,
+      assistantTurnCount: 1,
+      reasoningTokens: 11, reasoningEstimated: true,
+    });
+    try {
+      const projectDir = join(root, "proj");
+      mkdirSync(projectDir, { recursive: true });
+      const sessionId = "sess-A";
+      const parentTranscript = join(projectDir, `${sessionId}.jsonl`);
+      writeFileSync(parentTranscript, "");
+      const subagentDir = join(projectDir, sessionId, "subagents");
+      mkdirSync(subagentDir, { recursive: true });
+      // Write a placeholder agent file so locateSidechainUsage finds a candidate
+      const agentFile = join(subagentDir, "agent-abc.jsonl");
+      writeFileSync(agentFile, "");
+
+      const sentry = makeFakeSentry();
+      const session = createSubagentSession();
+
+      // PreToolUse
+      attachSubagentToEvent(sentry as never, session, {
+        hook_event_name: "PreToolUse",
+        session_id: sessionId,
+        tool_name: "Task",
+        tool_use_id: "tu_42",
+        tool_input: { subagent_type: "researcher", prompt: "go" },
+      } as PreToolUseEvent, { parentTranscriptPath: parentTranscript });
+
+      // PostToolUse — spy intercepts extractSidechainUsage
+      attachSubagentToEvent(sentry as never, session, {
+        hook_event_name: "PostToolUse",
+        session_id: sessionId,
+        tool_name: "Task",
+        tool_use_id: "tu_42",
+      } as PostToolUseEvent, { parentTranscriptPath: parentTranscript });
+
+      const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+      expect(chat).toBeDefined();
+      expect(chat!.attrs["gen_ai.conversation.id"]).toBe("sess-A");
+      expect(chat!.attrs["gen_ai.agent.name"]).toBe("researcher");
+      expect(chat!.attrs["gen_ai.usage.output_tokens.reasoning"]).toBe(11);
+      expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBe(true);
+    } finally {
+      spy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

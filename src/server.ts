@@ -382,6 +382,7 @@ export function startServer(
       config,
       undefined,
       event.tool_use_id,
+      event.session_id,
     );
     const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount}`;
     record.pendingTools.set(key, { span, startedAt, toolName: event.tool_name });

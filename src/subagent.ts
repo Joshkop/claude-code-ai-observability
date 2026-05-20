@@ -20,6 +20,8 @@ interface ActiveSubagent {
   subagentDir?: string;
   /** Wall-clock ms at PreToolUse — fallback for selecting the newest file. */
   startedAt: number;
+  /** sessionId of the parent turn that spawned this subagent — replicated
+   *  onto the synthesized chat child as gen_ai.conversation.id. */
   sessionId: string;
   /** C5 match keys captured from the Task tool_input at PreToolUse. */
   matchDescription?: string;
@@ -84,6 +86,7 @@ export function createSubagentSpan(
     "gen_ai.provider.name": "anthropic",
     "gen_ai.system": "anthropic",
     "gen_ai.operation.name": "invoke_agent",
+    "gen_ai.conversation.id": event.session_id,
   };
   if (subagentType) attributes["gen_ai.agent.name"] = subagentType;
   if (description) attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
@@ -181,7 +184,12 @@ export function attachSubagentToEvent(
     // breakdown.
     try {
       const usage = locateSidechainUsage(entry);
-      if (usage) attachChatChild(sentry, entry.span, usage);
+      if (usage) {
+        attachChatChild(sentry, entry.span, usage, {
+          sessionId: entry.sessionId,
+          subagentType: entry.subagentType,
+        });
+      }
     } catch {
       // best-effort — never fail PostToolUse on observability gaps.
     }
@@ -320,7 +328,17 @@ function readMeta(
   }
 }
 
-function attachChatChild(sentry: SentryLike, wrapper: Span, usage: SidechainUsage): void {
+interface ChatChildContext {
+  sessionId: string;
+  subagentType: string;
+}
+
+function attachChatChild(
+  sentry: SentryLike,
+  wrapper: Span,
+  usage: SidechainUsage,
+  ctx: ChatChildContext,
+): void {
   const startSpan = (sentry as unknown as {
     startInactiveSpan?: (opts: unknown) => Span;
     withActiveSpan?: <T>(parent: unknown, fn: () => T) => T;
@@ -328,10 +346,12 @@ function attachChatChild(sentry: SentryLike, wrapper: Span, usage: SidechainUsag
   if (typeof startSpan.startInactiveSpan !== "function") return;
 
   const create = (): Span => {
-    const attrs: Record<string, string | number> = {
+    const attrs: Record<string, string | number | boolean> = {
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "anthropic",
       "gen_ai.system": "anthropic",
+      "gen_ai.conversation.id": ctx.sessionId,
+      "gen_ai.agent.name": ctx.subagentType,
     };
     if (usage.model) {
       attrs["gen_ai.request.model"] = usage.model;
@@ -358,6 +378,12 @@ function attachChatChild(sentry: SentryLike, wrapper: Span, usage: SidechainUsag
   trySetAttribute(chat, "gen_ai.usage.input_tokens.cached", usage.cachedInputTokens);
   if (usage.cacheCreationTokens) {
     trySetAttribute(chat, "gen_ai.usage.input_tokens.cache_write", usage.cacheCreationTokens);
+  }
+  if (usage.reasoningTokens && usage.reasoningTokens > 0) {
+    trySetAttribute(chat, "gen_ai.usage.output_tokens.reasoning", usage.reasoningTokens);
+    if (usage.reasoningEstimated) {
+      trySetAttribute(chat, "claude_code.reasoning_tokens.estimated", true);
+    }
   }
   if (typeof usage.assistantTurnCount === "number") {
     trySetAttribute(chat, "claude_code.subagent.assistant_turns", usage.assistantTurnCount);

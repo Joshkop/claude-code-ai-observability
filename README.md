@@ -116,6 +116,26 @@ Create `~/.config/claude-code/sentry-monitor.json` (or `.jsonc` for comments):
 | `maxAttributeLength` | number | `12000` | Truncate span attribute values to this many characters |
 | `tags` | object | `{}` | Extra key/value string tags applied to every span |
 
+### Sampling
+
+This plugin defaults `tracesSampleRate` to `1.0` (capture every trace) and
+that is the **recommended** setting for AI traces.
+
+Sentry uses head-based sampling: the sampling decision is made at the root
+span and cascades to every child. If a turn's trace is dropped, every
+nested LLM call, tool execution, and subagent span is dropped with it.
+Lowering the sample rate means losing visibility into a proportional share
+of agent failures — a 10% rate hides 90% of incidents.
+
+Trace ingest cost is almost always negligible compared to the underlying
+LLM API spend, so dropping AI traces to "save money on observability"
+rarely pays off in practice. See [Sentry's sampling guidance for AI
+agents](https://docs.sentry.io/ai/monitoring/agents/sampling/) for the
+full rationale.
+
+If you nonetheless need to lower it, set `CLAUDE_SENTRY_TRACES_SAMPLE_RATE`
+or `tracesSampleRate` in your plugin config.
+
 ## Environment variable overrides
 
 All env vars take precedence over the config file.

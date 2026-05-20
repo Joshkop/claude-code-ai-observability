@@ -28,6 +28,20 @@ function extractTextFromContent(content) {
     }
     return parts.length ? parts.join("\n") : null;
 }
+function estimateReasoningTokensFromContent(content) {
+    if (!Array.isArray(content))
+        return 0;
+    let total = 0;
+    for (const block of content) {
+        if (block && typeof block === "object") {
+            const b = block;
+            if (b.type === "thinking" && typeof b.thinking === "string") {
+                total += Math.ceil(b.thinking.length / 4);
+            }
+        }
+    }
+    return total;
+}
 export function extractPerTurnTokens(path) {
     let raw;
     try {
@@ -79,6 +93,11 @@ export function extractPerTurnTokens(path) {
             }
             if (parsed.message?.model)
                 current.model = parsed.message.model;
+            const reasoning = estimateReasoningTokensFromContent(parsed.message?.content);
+            if (reasoning > 0) {
+                current.reasoningTokens = (current.reasoningTokens ?? 0) + reasoning;
+                current.reasoningEstimated = true;
+            }
             const text = extractTextFromContent(parsed.message?.content);
             if (text) {
                 current.response = current.response ? `${current.response}\n${text}` : text;
@@ -112,6 +131,7 @@ export function extractSidechainUsage(filePath) {
     let startTime;
     let endTime;
     let assistantTurnCount = 0;
+    let reasoningTokens = 0;
     let any = false;
     for (const line of raw.split("\n")) {
         const trimmed = line.trim();
@@ -146,6 +166,7 @@ export function extractSidechainUsage(filePath) {
             }
             if (parsed.message?.model)
                 model = parsed.message.model;
+            reasoningTokens += estimateReasoningTokensFromContent(parsed.message?.content);
         }
     }
     if (!any)
@@ -159,6 +180,9 @@ export function extractSidechainUsage(filePath) {
         startTime,
         endTime,
         assistantTurnCount,
+        ...(reasoningTokens > 0
+            ? { reasoningTokens, reasoningEstimated: true }
+            : {}),
     };
 }
 export function extractTotals(turns) {
