@@ -134,7 +134,7 @@ export function startServer(
   sentry: typeof Sentry,
   config: ResolvedPluginConfig,
   baseAutoTags: AutoTags,
-): { close: () => Promise<void>; emitHeartbeat: () => void; forceReap: () => void } {
+): { close: () => Promise<void>; emitHeartbeat: () => void; forceReap: () => Promise<void> } {
   const sessions = new Map<string, SessionRecord>();
   let droppedTotal = 0;
   const startedAt = Date.now();
@@ -179,10 +179,10 @@ export function startServer(
     });
   };
 
-  const reapStaleSession = (sessionId: string, record: SessionRecord): void => {
-    sentry.withIsolationScope((scope) => {
+  const reapStaleSession = async (sessionId: string, record: SessionRecord): Promise<void> => {
+    await sentry.withIsolationScope(async (scope) => {
       scope.setConversationId(sessionId);
-      try { void closeCurrentTurn(record).catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      try { await closeCurrentTurn(record); } catch { /* ignore */ }
       for (const [, pending] of record.pendingTools) {
         try { pending.span.end(); } catch { /* ignore */ }
       }
@@ -652,7 +652,7 @@ export function startServer(
       const now = Date.now();
       for (const [sid, record] of sessions) {
         if (isStaleSession(record, now)) {
-          reapStaleSession(sid, record);
+          void reapStaleSession(sid, record).catch(() => { /* ignore */ });
         }
       }
       try { void sentry.flush(2000); } catch { /* ignore */ }
@@ -681,12 +681,15 @@ export function startServer(
   const shutdown = async (): Promise<void> => {
     if (flushTimer) clearInterval(flushTimer);
     if (reapTimer) clearInterval(reapTimer);
-    for (const [, record] of sessions) {
+    for (const [sid, record] of sessions) {
       try {
-        closeCurrentTurn(record);
-        for (const [, pending] of record.pendingTools) {
-          try { pending.span.end(); } catch { /* ignore */ }
-        }
+        await sentry.withIsolationScope(async (scope) => {
+          scope.setConversationId(sid);
+          await closeCurrentTurn(record);
+          for (const [, pending] of record.pendingTools) {
+            try { pending.span.end(); } catch { /* ignore */ }
+          }
+        });
       } catch { /* ignore */ }
     }
     sessions.clear();
@@ -701,10 +704,12 @@ export function startServer(
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
-  const forceReap = (): void => {
+  const forceReap = async (): Promise<void> => {
+    const pending: Array<Promise<void>> = [];
     for (const [sid, record] of sessions) {
-      reapStaleSession(sid, record);
+      pending.push(reapStaleSession(sid, record));
     }
+    await Promise.all(pending);
   };
 
   return { close: shutdown, emitHeartbeat, forceReap };

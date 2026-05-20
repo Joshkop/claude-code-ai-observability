@@ -125,11 +125,11 @@ export function startServer(sentry, config, baseAutoTags) {
             lastEventAt: Date.now(),
         });
     };
-    const reapStaleSession = (sessionId, record) => {
-        sentry.withIsolationScope((scope) => {
+    const reapStaleSession = async (sessionId, record) => {
+        await sentry.withIsolationScope(async (scope) => {
             scope.setConversationId(sessionId);
             try {
-                void closeCurrentTurn(record).catch(() => { });
+                await closeCurrentTurn(record);
             }
             catch { /* ignore */ }
             for (const [, pending] of record.pendingTools) {
@@ -590,7 +590,7 @@ export function startServer(sentry, config, baseAutoTags) {
             const now = Date.now();
             for (const [sid, record] of sessions) {
                 if (isStaleSession(record, now)) {
-                    reapStaleSession(sid, record);
+                    void reapStaleSession(sid, record).catch(() => { });
                 }
             }
             try {
@@ -622,15 +622,18 @@ export function startServer(sentry, config, baseAutoTags) {
             clearInterval(flushTimer);
         if (reapTimer)
             clearInterval(reapTimer);
-        for (const [, record] of sessions) {
+        for (const [sid, record] of sessions) {
             try {
-                closeCurrentTurn(record);
-                for (const [, pending] of record.pendingTools) {
-                    try {
-                        pending.span.end();
+                await sentry.withIsolationScope(async (scope) => {
+                    scope.setConversationId(sid);
+                    await closeCurrentTurn(record);
+                    for (const [, pending] of record.pendingTools) {
+                        try {
+                            pending.span.end();
+                        }
+                        catch { /* ignore */ }
                     }
-                    catch { /* ignore */ }
-                }
+                });
             }
             catch { /* ignore */ }
         }
@@ -647,10 +650,12 @@ export function startServer(sentry, config, baseAutoTags) {
     };
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
-    const forceReap = () => {
+    const forceReap = async () => {
+        const pending = [];
         for (const [sid, record] of sessions) {
-            reapStaleSession(sid, record);
+            pending.push(reapStaleSession(sid, record));
         }
+        await Promise.all(pending);
     };
     return { close: shutdown, emitHeartbeat, forceReap };
 }
