@@ -429,3 +429,44 @@ describe("server: slash-command attribution (N2)", () => {
     expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 3: applyRespawnTag sets claude_code.collector.respawned_from_version
+// ---------------------------------------------------------------------------
+describe("applyRespawnTag: tags collector spans with prior version when env set", () => {
+  it("sets claude_code.collector.respawned_from_version when AIOBS_RESPAWNED_FROM env is present", async () => {
+    const tags: Record<string, string | undefined> = {};
+    const fakeSentry = {
+      init: () => undefined,
+      setTag: (k: string, v: string | undefined) => { tags[k] = v; },
+      setUser: () => undefined,
+      getCurrentScope: () => ({ setTag: () => undefined }),
+    };
+    const prev = process.env.AIOBS_RESPAWNED_FROM;
+    process.env.AIOBS_RESPAWNED_FROM = "0.2.1";
+    try {
+      const { applyRespawnTag } = await import("../src/index.js");
+      applyRespawnTag(fakeSentry as never);
+      expect(tags["claude_code.collector.respawned_from_version"]).toBe("0.2.1");
+    } finally {
+      if (prev === undefined) delete process.env.AIOBS_RESPAWNED_FROM;
+      else process.env.AIOBS_RESPAWNED_FROM = prev;
+    }
+  });
+
+  it("does not call setTag when AIOBS_RESPAWNED_FROM env is absent", async () => {
+    const tags: Record<string, string | undefined> = {};
+    const fakeSentry = {
+      setTag: (k: string, v: string | undefined) => { tags[k] = v; },
+    };
+    const prev = process.env.AIOBS_RESPAWNED_FROM;
+    delete process.env.AIOBS_RESPAWNED_FROM;
+    try {
+      const { applyRespawnTag } = await import("../src/index.js");
+      applyRespawnTag(fakeSentry as never);
+      expect(tags["claude_code.collector.respawned_from_version"]).toBeUndefined();
+    } finally {
+      if (prev !== undefined) process.env.AIOBS_RESPAWNED_FROM = prev;
+    }
+  });
+});

@@ -22,6 +22,25 @@ function parseInlineConfig(jsonText: string): ResolvedPluginConfig | null {
   }
 }
 
+const RESPAWN_TAG_TTL_MS = 60_000;
+
+export function applyRespawnTag(sentry: typeof SentryNS): void {
+  const fromVersion = process.env.AIOBS_RESPAWNED_FROM;
+  if (!fromVersion) return;
+  try {
+    sentry.setTag("claude_code.collector.respawned_from_version", fromVersion);
+  } catch {
+    return;
+  }
+  const timer = setTimeout(() => {
+    try {
+      sentry.setTag("claude_code.collector.respawned_from_version", undefined);
+    } catch { /* ignore */ }
+  }, RESPAWN_TAG_TTL_MS);
+  // Don't keep the process alive past its natural lifetime.
+  if (typeof timer.unref === "function") timer.unref();
+}
+
 async function startCollector(config: ResolvedPluginConfig): Promise<void> {
   const Sentry = loadSentry();
   Sentry.init({
@@ -56,6 +75,7 @@ async function startCollector(config: ResolvedPluginConfig): Promise<void> {
   // Route collector-side crashes into the same Sentry project — otherwise
   // users have no idea why traces stopped appearing.
   installGlobalHandlers(Sentry);
+  applyRespawnTag(Sentry);
   startServer(Sentry, config, {});
 }
 
