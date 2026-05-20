@@ -195,6 +195,11 @@ export function readTranscript(path: string): TranscriptReadResult {
   return { turns, byPromptId, degraded: false, session };
 }
 
+export interface SelectTurnResult {
+  turn: RealTurn | null;
+  matchedBy: "prompt_id" | "ordinal" | "none";
+}
+
 /**
  * C1: correlate the collector's open turn to a transcript turn.
  * promptId wins; otherwise ordinal among REAL turns (never among all
@@ -204,10 +209,12 @@ export function selectTurn(
   result: TranscriptReadResult,
   promptId: string | null | undefined,
   ordinal: number,
-): RealTurn | null {
+): SelectTurnResult {
   if (promptId) {
     const byId = result.byPromptId.get(promptId);
-    if (byId) return byId;
+    if (byId) return { turn: byId, matchedBy: "prompt_id" };
   }
-  return result.turns[ordinal] ?? null;
+  const t = result.turns[ordinal];
+  if (t) return { turn: t, matchedBy: "ordinal" };
+  return { turn: null, matchedBy: "none" };
 }

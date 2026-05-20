@@ -180,7 +180,7 @@ export function startServer(
   };
 
   const reapStaleSession = (sessionId: string, record: SessionRecord): void => {
-    try { closeCurrentTurn(record); } catch { /* ignore */ }
+    void closeCurrentTurn(record).catch(() => { /* ignore */ });
     for (const [, pending] of record.pendingTools) {
       try { pending.span.end(); } catch { /* ignore */ }
     }
@@ -188,7 +188,7 @@ export function startServer(
     sessions.delete(sessionId);
   };
 
-  const closeCurrentTurn = (record: SessionRecord): void => {
+  const closeCurrentTurn = async (record: SessionRecord): Promise<void> => {
     if (!record.currentTurnSpan) return;
     let tokens: CloseTurnInput["tokens"] = {
       turnIndex: record.turnIndex,
@@ -203,6 +203,7 @@ export function startServer(
     };
     let parseDegraded = false;
     let sessionDims: { permissionMode?: string; agentName?: string; entrypoint?: string } = {};
+    let tokenExtractionStatus = "transcript_missing";
     if (record.transcriptPath) {
       const result = readTranscript(record.transcriptPath);
       parseDegraded = result.degraded;
@@ -211,8 +212,29 @@ export function startServer(
       // it stays 1:1 with transcript-reader's real-turn index because each
       // UserPromptSubmit corresponds to exactly one real (non-sidechain,
       // non-tool_result) user line.
-      const turn = selectTurn(result, record.currentPromptId, record.turnIndex);
-      if (turn) tokens = turn;
+      const selected = selectTurn(result, record.currentPromptId, record.turnIndex);
+      if (!selected.turn) {
+        tokenExtractionStatus = "no_matching_turn";
+      } else {
+        tokens = selected.turn;
+        if (tokens.inputTokens + tokens.outputTokens === 0) {
+          // Late-flush hypothesis: assistant usage may not yet be on disk.
+          // Sleep briefly and try once more.
+          await new Promise((r) => setTimeout(r, 200));
+          const retry = readTranscript(record.transcriptPath);
+          parseDegraded = retry.degraded;
+          sessionDims = retry.session;
+          const retrySelected = selectTurn(retry, record.currentPromptId, record.turnIndex);
+          if (retrySelected.turn && (retrySelected.turn.inputTokens + retrySelected.turn.outputTokens) > 0) {
+            tokens = retrySelected.turn;
+            tokenExtractionStatus = "ok|matched_after_retry";
+          } else {
+            tokenExtractionStatus = "turn_had_no_usage";
+          }
+        } else {
+          tokenExtractionStatus = "ok";
+        }
+      }
     }
     if (tokens.model) record.responseModel = tokens.model;
     const cost = computeCost(
@@ -258,6 +280,7 @@ export function startServer(
         toolCount: record.turnToolCount,
         subagentCount: record.turnSubagentCount,
         toolsUsed: Array.from(record.turnTools),
+        tokenExtractionStatus,
       },
       config,
     );
@@ -310,43 +333,44 @@ export function startServer(
 
   const handleUserPrompt = (event: UserPromptSubmitEvent): void => {
     const record = getOrCreateSession(event);
-    closeCurrentTurn(record);
-    record.turnIndex += 1;
-    record.currentPromptId = event.prompt_id ?? null;
-    const prompt = event.prompt ?? event.message ?? null;
-    record.currentTurnStart = Date.now() / 1000;
-    record.currentTurnSpan = openTurnTransaction(
-      sentry,
-      event.session_id,
-      record.turnIndex,
-      prompt,
-      record.autoTags,
-      config,
-      record.model,
-    );
-    // R3: touchSession already counted droppedTotal + emitted the breadcrumb
-    // for this event, but it ran before this turn's span existed (it saw the
-    // prior/closed span or null). Re-stamp the just-opened turn span so the
-    // loss is visible on the turn it actually precedes. No double count: only
-    // the span attribute is repeated here, not droppedTotal/breadcrumb.
-    const droppedNow = event._aiobs?.dropped_since_last;
-    if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
-      try {
-        record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
-      } catch { /* ignore */ }
-    }
-    // N2: a slash command in the prompt → command attribution on the turn.
-    if (prompt) {
-      const cmd = parseSlashCommand(prompt);
-      if (cmd && record.currentTurnSpan) {
+    void closeCurrentTurn(record).then(() => {
+      record.turnIndex += 1;
+      record.currentPromptId = event.prompt_id ?? null;
+      const prompt = event.prompt ?? event.message ?? null;
+      record.currentTurnStart = Date.now() / 1000;
+      record.currentTurnSpan = openTurnTransaction(
+        sentry,
+        event.session_id,
+        record.turnIndex,
+        prompt,
+        record.autoTags,
+        config,
+        record.model,
+      );
+      // R3: touchSession already counted droppedTotal + emitted the breadcrumb
+      // for this event, but it ran before this turn's span existed (it saw the
+      // prior/closed span or null). Re-stamp the just-opened turn span so the
+      // loss is visible on the turn it actually precedes. No double count: only
+      // the span attribute is repeated here, not droppedTotal/breadcrumb.
+      const droppedNow = event._aiobs?.dropped_since_last;
+      if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
         try {
-          record.currentTurnSpan.setAttribute("claude_code.command.name", cmd.name);
-          if (cmd.plugin) {
-            record.currentTurnSpan.setAttribute("claude_code.command.plugin", cmd.plugin);
-          }
+          record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
         } catch { /* ignore */ }
       }
-    }
+      // N2: a slash command in the prompt → command attribution on the turn.
+      if (prompt) {
+        const cmd = parseSlashCommand(prompt);
+        if (cmd && record.currentTurnSpan) {
+          try {
+            record.currentTurnSpan.setAttribute("claude_code.command.name", cmd.name);
+            if (cmd.plugin) {
+              record.currentTurnSpan.setAttribute("claude_code.command.plugin", cmd.plugin);
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }).catch(() => { /* ignore */ });
   };
 
   const handlePreTool = (event: PreToolUseEvent): void => {
@@ -465,7 +489,7 @@ export function startServer(
     if (event.transcript_path && !record.transcriptPath) {
       record.transcriptPath = event.transcript_path;
     }
-    closeCurrentTurn(record);
+    await closeCurrentTurn(record);
     for (const [, pending] of record.pendingTools) {
       try { pending.span.end(); } catch { /* ignore */ }
     }
