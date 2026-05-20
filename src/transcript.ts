@@ -47,6 +47,20 @@ function extractTextFromContent(content: unknown): string | null {
   return parts.length ? parts.join("\n") : null;
 }
 
+function estimateReasoningTokensFromContent(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  let total = 0;
+  for (const block of content) {
+    if (block && typeof block === "object") {
+      const b = block as Record<string, unknown>;
+      if (b.type === "thinking" && typeof b.thinking === "string") {
+        total += Math.ceil(b.thinking.length / 4);
+      }
+    }
+  }
+  return total;
+}
+
 export function extractPerTurnTokens(path: string): TurnTokens[] {
   let raw: string;
   try {
@@ -93,6 +107,11 @@ export function extractPerTurnTokens(path: string): TurnTokens[] {
         current.totalTokens = current.inputTokens + current.outputTokens;
       }
       if (parsed.message?.model) current.model = parsed.message.model;
+      const reasoning = estimateReasoningTokensFromContent(parsed.message?.content);
+      if (reasoning > 0) {
+        current.reasoningTokens = (current.reasoningTokens ?? 0) + reasoning;
+        current.reasoningEstimated = true;
+      }
       const text = extractTextFromContent(parsed.message?.content);
       if (text) {
         current.response = current.response ? `${current.response}\n${text}` : text;

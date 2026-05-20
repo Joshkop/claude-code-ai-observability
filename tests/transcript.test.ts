@@ -105,6 +105,45 @@ describe("extractPerTurnTokens", () => {
     expect(turns).toHaveLength(1);
     expect(turns[0].model).toBe("claude-haiku-4-5-20251001");
   });
+
+  it("estimates reasoning tokens from thinking blocks", () => {
+    const thinkingText = "a".repeat(40); // 40 chars → ceil(40/4) = 10 tokens
+    const p = make(
+      JSON.stringify({ type: "user", message: { content: "go" } }) + "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          usage: { input_tokens: 5, output_tokens: 30 },
+          content: [
+            { type: "thinking", thinking: thinkingText },
+            { type: "text", text: "done" },
+          ],
+        },
+      }) + "\n"
+    );
+    const turns = extractPerTurnTokens(p);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].reasoningTokens).toBe(10);
+    expect(turns[0].reasoningEstimated).toBe(true);
+  });
+
+  it("omits reasoning fields when no thinking block present", () => {
+    const p = make(
+      JSON.stringify({ type: "user", message: { content: "go" } }) + "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          usage: { input_tokens: 5, output_tokens: 30 },
+          content: [{ type: "text", text: "done" }],
+        },
+      }) + "\n"
+    );
+    const turns = extractPerTurnTokens(p);
+    expect(turns[0].reasoningTokens).toBeUndefined();
+    expect(turns[0].reasoningEstimated).toBeUndefined();
+  });
 });
 
 describe("extractTotals", () => {
