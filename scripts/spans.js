@@ -50,6 +50,7 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": "anthropic",
             "gen_ai.system": "anthropic",
+            "gen_ai.agent.name": "claude-code",
             ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
             ...(sessionId ? { "claude_code.session_id": sessionId } : {}),
             ...(respModel ? { "gen_ai.request.model": respModel } : {}),
@@ -67,6 +68,12 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
     chatSpan.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cachedInputTokens);
     if (tokens.cacheCreationTokens) {
         chatSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
+    }
+    if (tokens.reasoningTokens && tokens.reasoningTokens > 0) {
+        chatSpan.setAttribute("gen_ai.usage.output_tokens.reasoning", tokens.reasoningTokens);
+        if (tokens.reasoningEstimated) {
+            chatSpan.setAttribute("claude_code.reasoning_tokens.estimated", true);
+        }
     }
     if (config.recordOutputs && response) {
         chatSpan.setAttribute("gen_ai.response.text", serialize(response, config.maxAttributeLength));
@@ -97,7 +104,7 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
     }
     turnSpan.end(endTime);
 }
-export function createToolSpan(sentry, parentSpan, toolName, input, config, startTime, toolUseId) {
+export function createToolSpan(sentry, parentSpan, toolName, input, config, startTime, toolUseId, sessionId) {
     const start = () => {
         const span = sentry.startInactiveSpan({
             op: "gen_ai.execute_tool",
@@ -111,6 +118,7 @@ export function createToolSpan(sentry, parentSpan, toolName, input, config, star
                 "gen_ai.provider.name": "anthropic",
                 "gen_ai.system": "anthropic",
                 ...(toolUseId ? { "gen_ai.tool.call.id": toolUseId } : {}),
+                ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
             },
         });
         if (config.recordInputs && input !== undefined) {

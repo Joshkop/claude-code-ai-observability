@@ -40,6 +40,7 @@ export function createSubagentSpan(sentry, event, options = {}) {
         "gen_ai.provider.name": "anthropic",
         "gen_ai.system": "anthropic",
         "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.conversation.id": event.session_id,
     };
     if (subagentType)
         attributes["gen_ai.agent.name"] = subagentType;
@@ -134,8 +135,12 @@ export function attachSubagentToEvent(sentry, session, event, options = {}) {
         // breakdown.
         try {
             const usage = locateSidechainUsage(entry);
-            if (usage)
-                attachChatChild(sentry, entry.span, usage);
+            if (usage) {
+                attachChatChild(sentry, entry.span, usage, {
+                    sessionId: entry.sessionId,
+                    subagentType: entry.subagentType,
+                });
+            }
         }
         catch {
             // best-effort — never fail PostToolUse on observability gaps.
@@ -258,7 +263,7 @@ function readMeta(transcriptPath) {
         return null;
     }
 }
-function attachChatChild(sentry, wrapper, usage) {
+function attachChatChild(sentry, wrapper, usage, ctx) {
     const startSpan = sentry;
     if (typeof startSpan.startInactiveSpan !== "function")
         return;
@@ -267,6 +272,8 @@ function attachChatChild(sentry, wrapper, usage) {
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": "anthropic",
             "gen_ai.system": "anthropic",
+            "gen_ai.conversation.id": ctx.sessionId,
+            "gen_ai.agent.name": ctx.subagentType,
         };
         if (usage.model) {
             attrs["gen_ai.request.model"] = usage.model;
@@ -292,6 +299,12 @@ function attachChatChild(sentry, wrapper, usage) {
     trySetAttribute(chat, "gen_ai.usage.input_tokens.cached", usage.cachedInputTokens);
     if (usage.cacheCreationTokens) {
         trySetAttribute(chat, "gen_ai.usage.input_tokens.cache_write", usage.cacheCreationTokens);
+    }
+    if (usage.reasoningTokens && usage.reasoningTokens > 0) {
+        trySetAttribute(chat, "gen_ai.usage.output_tokens.reasoning", usage.reasoningTokens);
+        if (usage.reasoningEstimated) {
+            trySetAttribute(chat, "claude_code.reasoning_tokens.estimated", true);
+        }
     }
     if (typeof usage.assistantTurnCount === "number") {
         trySetAttribute(chat, "claude_code.subagent.assistant_turns", usage.assistantTurnCount);

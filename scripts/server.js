@@ -311,7 +311,7 @@ export function startServer(sentry, config, baseAutoTags) {
         // children of invoke_agent <subagent_type> rather than siblings on the
         // parent turn. Falls back to the turn span when no subagent is active.
         const toolParent = findActiveSubagentSpan(subagentSession, event.session_id) ?? parent;
-        const span = createToolSpan(sentry, toolParent, event.tool_name, event.tool_input, config, undefined, event.tool_use_id);
+        const span = createToolSpan(sentry, toolParent, event.tool_name, event.tool_input, config, undefined, event.tool_use_id, event.session_id);
         const key = event.tool_use_id ?? `${event.tool_name}:${record.toolCount}`;
         record.pendingTools.set(key, { span, startedAt, toolName: event.tool_name });
         record.toolCount += 1;
