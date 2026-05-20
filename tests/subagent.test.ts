@@ -1,14 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   attachSubagentToEvent,
   createSubagentSession,
+  createSubagentSpan,
   findActiveSubagentSpan,
   isSubagentInvocation,
 } from "../src/subagent.js";
 import type { PreToolUseEvent, PostToolUseEvent } from "../src/types.js";
+import * as transcriptMod from "../src/transcript.js";
 
 function makeFakeSpan() {
   const attrs: Record<string, unknown> = {};
@@ -167,6 +169,20 @@ describe("attachSubagentToEvent", () => {
       session,
       preToolUseEvent("Task", { subagent_type: "researcher" }),
     );
+    expect(sentry.spans[0].attrs["gen_ai.agent.name"]).toBe("researcher");
+  });
+
+  it("sets gen_ai.conversation.id from event.session_id on subagent span", () => {
+    const sentry = makeFakeSentry();
+    const span = createSubagentSpan(sentry as never, {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-1",
+      tool_name: "Task",
+      tool_use_id: "tu_1",
+      tool_input: { subagent_type: "researcher", prompt: "find X", description: "research" },
+    } as PreToolUseEvent);
+    expect(span).not.toBeNull();
+    expect(sentry.spans[0].attrs["gen_ai.conversation.id"]).toBe("sess-1");
     expect(sentry.spans[0].attrs["gen_ai.agent.name"]).toBe("researcher");
   });
 });

@@ -78,6 +78,7 @@ export function createSubagentSpan(
     "gen_ai.provider.name": "anthropic",
     "gen_ai.system": "anthropic",
     "gen_ai.operation.name": "invoke_agent",
+    "gen_ai.conversation.id": event.session_id,
   };
   if (subagentType) attributes["gen_ai.agent.name"] = subagentType;
   if (description) attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
