@@ -240,7 +240,7 @@ function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function spawnCollector(port: number, configJson: string): Promise<void> {
+export async function spawnCollector(port: number, configJson: string, options: { fromVersion?: string } = {}): Promise<void> {
   const here = dirname(fileURLToPath(import.meta.url));
   const indexPath = resolve(here, "index.js");
   if (!existsSync(indexPath)) return;
@@ -248,10 +248,12 @@ async function spawnCollector(port: number, configJson: string): Promise<void> {
   const out = openSync(join(dir, "collector.log"), "a");
   const err = openSync(join(dir, "collector.err.log"), "a");
   try {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (options.fromVersion) env.AIOBS_RESPAWNED_FROM = options.fromVersion;
     const child = spawn(process.execPath, [indexPath, "--serve", configJson], {
       detached: true,
       stdio: ["ignore", out, err],
-      env: { ...process.env },
+      env,
     });
     child.unref();
   } catch {
@@ -324,6 +326,7 @@ export async function ensureServerRunning(port: number, configJson: string): Pro
 
           // Step 3b: Kill stale (if any) then spawn fresh.
           const toEvict = recheck?.ok ? recheck : info?.ok ? info : null;
+          const fromVersion = toEvict?.version;
           if (toEvict) {
             await killStaleCollector(
               toEvict.version
@@ -333,7 +336,7 @@ export async function ensureServerRunning(port: number, configJson: string): Pro
               port,
             );
           }
-          await spawnCollector(port, configJson);
+          await spawnCollector(port, configJson, { fromVersion });
         } finally {
           releaseLock(lockPath);
         }
@@ -393,7 +396,7 @@ async function loadConfigJson(): Promise<string> {
   return "{}";
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const stdin = await readStdin();
   let event: HookEvent;
   try {
@@ -402,10 +405,12 @@ async function main(): Promise<void> {
     return;
   }
   const port = getPort();
-  if (event.hook_event_name === "SessionStart") {
-    const configJson = await loadConfigJson();
-    await ensureServerRunning(port, configJson);
-  }
+  // Self-heal on every hook event so `/plugin update` mid-session takes
+  // effect on the next hook, not the next cold start. ensureServerRunning
+  // short-circuits when the collector is already version-matched — the
+  // steady-state cost is one ~LAN probe.
+  const configJson = await loadConfigJson();
+  await ensureServerRunning(port, configJson);
   await sendHookEvent(event, port);
 }
 

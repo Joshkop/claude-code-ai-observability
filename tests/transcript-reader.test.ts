@@ -51,8 +51,8 @@ describe("readTranscript — turn segmentation (C1)", () => {
     expect(r.turns).toHaveLength(2);
     expect(r.byPromptId.get("p1")!.inputTokens).toBe(10);
     expect(r.byPromptId.get("p2")!.inputTokens).toBe(20);
-    expect(selectTurn(r, "p2", 99)!.outputTokens).toBe(4);
-    expect(selectTurn(r, undefined, 0)!.promptId).toBe("p1");
+    expect(selectTurn(r, "p2", 99).turn!.outputTokens).toBe(4);
+    expect(selectTurn(r, undefined, 0).turn!.promptId).toBe("p1");
   });
 });
 
@@ -104,5 +104,35 @@ describe("readTranscript — N4 session dimensions", () => {
     expect(r.session.permissionMode).toBe("bypassPermissions");
     expect(r.session.agentName).toBe("claude-code");
     expect(r.session.entrypoint).toBe("cli");
+  });
+});
+
+describe("selectTurn matchedBy discriminator", () => {
+  it("returns matchedBy='prompt_id' when promptId hits", () => {
+    const turn = { promptId: "p1", inputTokens: 5, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 8, model: "m", prompt: null, response: null, turnIndex: 0 };
+    const result = {
+      turns: [turn],
+      byPromptId: new Map([["p1", turn]]),
+      degraded: false,
+      session: {},
+    };
+    const out = selectTurn(result, "p1", 0);
+    expect(out.matchedBy).toBe("prompt_id");
+    expect(out.turn).not.toBeNull();
+  });
+
+  it("returns matchedBy='ordinal' when promptId misses but ordinal hits", () => {
+    const turn = { promptId: null, inputTokens: 5, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 8, model: "m", prompt: null, response: null, turnIndex: 0 };
+    const result = { turns: [turn], byPromptId: new Map(), degraded: false, session: {} };
+    const out = selectTurn(result, null, 0);
+    expect(out.matchedBy).toBe("ordinal");
+    expect(out.turn).toBe(turn);
+  });
+
+  it("returns matchedBy='none' when neither matches", () => {
+    const result = { turns: [], byPromptId: new Map(), degraded: false, session: {} };
+    const out = selectTurn(result, "p1", 0);
+    expect(out.matchedBy).toBe("none");
+    expect(out.turn).toBeNull();
   });
 });

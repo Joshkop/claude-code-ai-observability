@@ -34,7 +34,7 @@ export function openTurnTransaction(sentry, sessionId, turnIndex, prompt, tags, 
     return span;
 }
 export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
-    const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed } = input;
+    const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus } = input;
     const respModel = responseModel ?? tokens.model ?? undefined;
     // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
     // putting tokens only on the invoke_agent root yields "No Data" in that
@@ -77,6 +77,9 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
     }
     if (config.recordOutputs && response) {
         chatSpan.setAttribute("gen_ai.response.text", serialize(response, config.maxAttributeLength));
+    }
+    if (tokenExtractionStatus) {
+        chatSpan.setAttribute("claude_code.token_extraction.status", tokenExtractionStatus);
     }
     chatSpan.end(endTime);
     if (respModel) {

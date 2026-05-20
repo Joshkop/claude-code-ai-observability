@@ -161,7 +161,10 @@ export function selectTurn(result, promptId, ordinal) {
     if (promptId) {
         const byId = result.byPromptId.get(promptId);
         if (byId)
-            return byId;
+            return { turn: byId, matchedBy: "prompt_id" };
     }
-    return result.turns[ordinal] ?? null;
+    const t = result.turns[ordinal];
+    if (t)
+        return { turn: t, matchedBy: "ordinal" };
+    return { turn: null, matchedBy: "none" };
 }

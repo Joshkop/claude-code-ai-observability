@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
 import os from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig, resolveDefaults } from "./config.js";
 import { startServer } from "./server.js";
 import { installGlobalHandlers } from "./sentry-errors.js";
@@ -17,6 +19,27 @@ function parseInlineConfig(jsonText) {
     catch {
         return null;
     }
+}
+const RESPAWN_TAG_TTL_MS = 60_000;
+export function applyRespawnTag(sentry) {
+    const fromVersion = process.env.AIOBS_RESPAWNED_FROM;
+    if (!fromVersion)
+        return;
+    try {
+        sentry.setTag("claude_code.collector.respawned_from_version", fromVersion);
+    }
+    catch {
+        return;
+    }
+    const timer = setTimeout(() => {
+        try {
+            sentry.setTag("claude_code.collector.respawned_from_version", undefined);
+        }
+        catch { /* ignore */ }
+    }, RESPAWN_TAG_TTL_MS);
+    // Don't keep the process alive past its natural lifetime.
+    if (typeof timer.unref === "function")
+        timer.unref();
 }
 async function startCollector(config) {
     const Sentry = loadSentry();
@@ -54,6 +77,7 @@ async function startCollector(config) {
     // Route collector-side crashes into the same Sentry project — otherwise
     // users have no idea why traces stopped appearing.
     installGlobalHandlers(Sentry);
+    applyRespawnTag(Sentry);
     startServer(Sentry, config, {});
 }
 async function main() {
@@ -72,7 +96,21 @@ async function main() {
     }
     await startCollector(config);
 }
-main().catch((err) => {
-    process.stderr.write(`collector failed: ${err.message ?? err}\n`);
-    process.exit(1);
-});
+// Only auto-run main() when this module is the process entry point. Importing
+// it from tests (or any other code) must NOT spawn the collector or trigger
+// process.exit — under vitest those calls are intercepted and re-thrown,
+// which then cascades into a second process.exit(1) and crashes the test run.
+const isEntry = (() => {
+    try {
+        return process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+    }
+    catch {
+        return false;
+    }
+})();
+if (isEntry) {
+    main().catch((err) => {
+        process.stderr.write(`collector failed: ${err.message ?? err}\n`);
+        process.exit(1);
+    });
+}

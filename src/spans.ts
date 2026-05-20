@@ -67,6 +67,9 @@ export interface CloseTurnInput {
   subagentCount?: number;
   /** De-duplicated list of tool names used in this turn. */
   toolsUsed?: string[];
+  /** Diagnostic: why per-turn tokens were or were not extracted from transcript.
+   *  See spec docs/superpowers/specs/2026-05-20-collector-self-heal-and-zero-cost-diagnostics-design.md */
+  tokenExtractionStatus?: string;
 }
 
 export function closeTurnSpan(
@@ -76,7 +79,7 @@ export function closeTurnSpan(
   config: ResolvedPluginConfig,
   endTime?: number,
 ): void {
-  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed } = input;
+  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus } = input;
   const respModel = responseModel ?? tokens.model ?? undefined;
 
   // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
@@ -133,6 +136,12 @@ export function closeTurnSpan(
     chatSpan.setAttribute(
       "gen_ai.response.text",
       serialize(response, config.maxAttributeLength),
+    );
+  }
+  if (tokenExtractionStatus) {
+    chatSpan.setAttribute(
+      "claude_code.token_extraction.status",
+      tokenExtractionStatus,
     );
   }
   chatSpan.end(endTime);

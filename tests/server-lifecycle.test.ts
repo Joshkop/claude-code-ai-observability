@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -427,5 +427,174 @@ describe("server: slash-command attribution (N2)", () => {
     const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: applyRespawnTag sets claude_code.collector.respawned_from_version
+// ---------------------------------------------------------------------------
+describe("applyRespawnTag: tags collector spans with prior version when env set", () => {
+  it("sets claude_code.collector.respawned_from_version when AIOBS_RESPAWNED_FROM env is present", async () => {
+    const tags: Record<string, string | undefined> = {};
+    const fakeSentry = {
+      init: () => undefined,
+      setTag: (k: string, v: string | undefined) => { tags[k] = v; },
+      setUser: () => undefined,
+      getCurrentScope: () => ({ setTag: () => undefined }),
+    };
+    const prev = process.env.AIOBS_RESPAWNED_FROM;
+    process.env.AIOBS_RESPAWNED_FROM = "0.2.1";
+    try {
+      const { applyRespawnTag } = await import("../src/index.js");
+      applyRespawnTag(fakeSentry as never);
+      expect(tags["claude_code.collector.respawned_from_version"]).toBe("0.2.1");
+    } finally {
+      if (prev === undefined) delete process.env.AIOBS_RESPAWNED_FROM;
+      else process.env.AIOBS_RESPAWNED_FROM = prev;
+    }
+  });
+
+  it("does not call setTag when AIOBS_RESPAWNED_FROM env is absent", async () => {
+    const tags: Record<string, string | undefined> = {};
+    const fakeSentry = {
+      setTag: (k: string, v: string | undefined) => { tags[k] = v; },
+    };
+    const prev = process.env.AIOBS_RESPAWNED_FROM;
+    delete process.env.AIOBS_RESPAWNED_FROM;
+    try {
+      const { applyRespawnTag } = await import("../src/index.js");
+      applyRespawnTag(fakeSentry as never);
+      expect(tags["claude_code.collector.respawned_from_version"]).toBeUndefined();
+    } finally {
+      if (prev !== undefined) process.env.AIOBS_RESPAWNED_FROM = prev;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tasks 6 & 7: token_extraction.status diagnostic attribute
+// ---------------------------------------------------------------------------
+describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+  let tmpDirs: string[] = [];
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    tmpDirs = [];
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
+  afterEach(async () => {
+    await close();
+    delete process.env.SENTRY_COLLECTOR_PORT;
+    for (const d of tmpDirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("emits token_extraction.status=transcript_missing when transcriptPath empty", async () => {
+    // SessionStart with no transcript_path → transcriptPath is undefined
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-tm" });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-tm", prompt: "hi" });
+    // SessionEnd closes the turn; transcriptPath is still unset → transcript_missing
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tm" });
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("transcript_missing");
+  });
+
+  it("emits status=ok when transcript has tokens for the turn", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-te-ok-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, [
+      JSON.stringify({ type: "user", promptId: null, message: { content: "go" } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-sonnet-4-6", usage: { input_tokens: 50, output_tokens: 20 } } }),
+    ].join("\n"), "utf8");
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-tok", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-tok", prompt: "go" });
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tok", transcript_path: tx });
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok");
+  });
+
+  it("emits status=no_matching_turn when transcript is empty/no real turns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-te-nmt-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    // Write a transcript with no turns (only typed lines, no user/assistant pairs)
+    writeFileSync(tx, JSON.stringify({ type: "summary", permissionMode: "default" }) + "\n", "utf8");
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-nmt", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-nmt", prompt: "go" });
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-nmt", transcript_path: tx });
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("no_matching_turn");
+  });
+
+  it("emits status=turn_had_no_usage when matched turn has zero usage and retry also zero", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-te-tnz-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    // Turn with zero usage
+    writeFileSync(tx, [
+      JSON.stringify({ type: "user", promptId: null, message: { content: "go" } }),
+      JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 0, output_tokens: 0 } } }),
+    ].join("\n"), "utf8");
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-tnz", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-tnz", prompt: "go" });
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tnz", transcript_path: tx });
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("turn_had_no_usage");
+  });
+
+  it("emits status='ok|matched_after_retry' when first read had 0 usage and second has usage", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-te-retry-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, "placeholder\n", "utf8");
+
+    const emptyResult = {
+      turns: [{ promptId: null, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 0, model: "m", prompt: null, response: null, turnIndex: 0 }],
+      byPromptId: new Map<string, never>(),
+      degraded: false,
+      session: {},
+    };
+    const populatedResult = {
+      turns: [{ promptId: null, inputTokens: 100, outputTokens: 50, cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 150, model: "m", prompt: null, response: null, turnIndex: 0 }],
+      byPromptId: new Map<string, never>(),
+      degraded: false,
+      session: {},
+    };
+
+    let callCount = 0;
+    const mod = await import("../src/transcript-reader.js");
+    vi.spyOn(mod, "readTranscript").mockImplementation(() => {
+      callCount += 1;
+      return callCount === 1 ? emptyResult : populatedResult;
+    });
+
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-retry", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-retry", prompt: "go" });
+    await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-retry", transcript_path: tx });
+
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok|matched_after_retry");
+    expect(chat!.attrs["gen_ai.usage.input_tokens"]).toBe(100);
+    expect(chat!.attrs["gen_ai.usage.output_tokens"]).toBe(50);
+    expect(callCount).toBe(2);
   });
 });
