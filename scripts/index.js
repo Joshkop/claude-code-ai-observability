@@ -49,6 +49,12 @@ async function startCollector(config) {
         environment: config.environment,
         release: config.release,
         debug: config.debug,
+        // Required for Sentry's AI Agents → Conversations view to populate.
+        // Without this flag the SDK still emits gen_ai.conversation.id on
+        // spans (so traces / span detail work), but Sentry's Conversations
+        // data pipeline never receives them and the view stays empty. Added
+        // in @sentry/node 10.53.0; see PR getsentry/sentry-javascript#20785.
+        streamGenAiSpans: true,
     });
     // Promote user-configured tags (e.g. `developer`) to the isolation scope
     // BEFORE any spans are created, so they propagate to every child span

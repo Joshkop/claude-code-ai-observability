@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Runtime dependencies for claude-code-sentry-monitor hooks",
   "dependencies": {
-    "@sentry/node": "^9.0.0",
+    "@sentry/node": "^10.53.1",
     "strip-json-comments": "^5.0.1"
   },
   "packageManager": "pnpm@10.9.0"

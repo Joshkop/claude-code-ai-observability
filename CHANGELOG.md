@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.5] - 2026-05-20
+
+### Fixed
+
+- **Sentry AI Agents → Conversations view now populates.** 0.2.2 added `gen_ai.conversation.id` on every span in a turn's call tree, but the view stayed empty because Sentry's Conversations data pipeline only ingests `gen_ai.*` spans when the SDK's `streamGenAiSpans` option is enabled. That option was introduced in `@sentry/node` 10.53.0 (PR getsentry/sentry-javascript#20785). Bumped `@sentry/node` from `^9.0.0` to `^10.53.1` and enabled the flag.
+
+### Changed
+
+- **`@sentry/node` upgraded from 9.x to 10.x.** Spans emitted to Sentry are unchanged in shape from a plugin perspective (`gen_ai.invoke_agent`, `gen_ai.chat`, `gen_ai.execute_tool` with the same attributes). No user-facing config changes.
+
 ## [0.2.4] - 2026-05-20
 
 ### Changed
