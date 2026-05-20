@@ -10,9 +10,12 @@
  * side effects in tests.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
-import { probeHealth, readPidFile, sendHookEvent, _droppedCountPath, readDroppedCount, incrementDroppedCount, resetDroppedCount } from "../src/hook-client.js";
+import { probeHealth, readPidFile, sendHookEvent, _droppedCountPath, readDroppedCount, incrementDroppedCount, resetDroppedCount, main, spawnCollector } from "../src/hook-client.js";
 import { PID_FILE, CACHE_DIR, PLUGIN_VERSION } from "../src/plugin-meta.js";
 
 // ---------------------------------------------------------------------------
@@ -266,4 +269,99 @@ describe("R3 — dropped-event counter round-trip", () => {
     expect(readDroppedCount()).toBe(0);
     expect(existsSync(_droppedCountPath())).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 1: Self-heal on every hook event (not just SessionStart)
+// ---------------------------------------------------------------------------
+describe("self-heal: ensureServerRunning called on non-SessionStart events", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    // Restore stdin to a clean state for subsequent tests
+    process.stdin.removeAllListeners();
+  });
+
+  it("calls ensureServerRunning (probes /health) on a PreToolUse event", async () => {
+    const healthUrls: string[] = [];
+    const healthBody = JSON.stringify({ ok: true, version: PLUGIN_VERSION, pid: 1, port: 19877, startedAt: 0 });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("/health")) {
+        healthUrls.push(url);
+        return Promise.resolve(new Response(healthBody, { status: 200 }));
+      }
+      // /hook endpoint
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }));
+
+    const event = { hook_event_name: "PreToolUse", session_id: "sess-selfheal-1", tool_name: "Bash" };
+    // Push the event onto stdin before calling main()
+    process.stdin.push(JSON.stringify(event));
+    process.stdin.push(null);
+
+    await main();
+
+    // ensureServerRunning must have probed /health (proving it ran, not just sendHookEvent)
+    expect(healthUrls.length).toBeGreaterThanOrEqual(1);
+    expect(healthUrls[0]).toContain("/health");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2: spawnCollector injects AIOBS_RESPAWNED_FROM env when fromVersion set
+// ---------------------------------------------------------------------------
+describe("spawnCollector: AIOBS_RESPAWNED_FROM env propagation", () => {
+  // The index.js path is resolved relative to hook-client.ts at runtime.
+  // Under vitest/tsx the source url is src/hook-client.ts, so index.js is
+  // expected at src/index.js. We create a tiny script there for the duration
+  // of the test, then clean it up.
+  const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const fakeIndexPath = join(srcDir, "index.js");
+  let tmpDir: string;
+  let envFile: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "aiobs-spawn-test-"));
+    envFile = join(tmpDir, "env.json");
+    // Script writes AIOBS_RESPAWNED_FROM to a file then exits
+    writeFileSync(
+      fakeIndexPath,
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(envFile)}, JSON.stringify({ AIOBS_RESPAWNED_FROM: process.env.AIOBS_RESPAWNED_FROM ?? null }));\nprocess.exit(0);\n`,
+      "utf8",
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    try { unlinkSync(fakeIndexPath); } catch { /* ignore */ }
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("spawned child receives AIOBS_RESPAWNED_FROM when fromVersion is set", async () => {
+    // Stub fetch so probeHealth returns version-matched immediately — exits the
+    // spawnCollector wait loop after the first successful spawn probe.
+    const healthBody = JSON.stringify({ ok: true, version: PLUGIN_VERSION, pid: 99, port: 19877, startedAt: 0 });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(healthBody, { status: 200 })));
+
+    await spawnCollector(19877, "{}", { fromVersion: "0.2.1" });
+
+    // Give the child a moment to finish writing before we read
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(existsSync(envFile)).toBe(true);
+    const written = JSON.parse(readFileSync(envFile, "utf8")) as { AIOBS_RESPAWNED_FROM: string | null };
+    expect(written.AIOBS_RESPAWNED_FROM).toBe("0.2.1");
+  }, 10_000);
+
+  it("spawned child does NOT receive AIOBS_RESPAWNED_FROM when fromVersion is absent", async () => {
+    const healthBody = JSON.stringify({ ok: true, version: PLUGIN_VERSION, pid: 99, port: 19877, startedAt: 0 });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(healthBody, { status: 200 })));
+
+    await spawnCollector(19877, "{}", {});
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(existsSync(envFile)).toBe(true);
+    const written = JSON.parse(readFileSync(envFile, "utf8")) as { AIOBS_RESPAWNED_FROM: string | null };
+    expect(written.AIOBS_RESPAWNED_FROM).toBeNull();
+  }, 10_000);
 });
