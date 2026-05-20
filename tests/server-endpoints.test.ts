@@ -34,6 +34,9 @@ function makeFakeSentry() {
     withActiveSpan<T>(_parent: unknown, fn: () => T): T {
       return fn();
     },
+    withIsolationScope<T>(fn: (scope: { setConversationId(_id: string | null | undefined): void }) => T): T {
+      return fn({ setConversationId: () => {} });
+    },
     flush: async () => true,
   };
 }
