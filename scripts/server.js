@@ -126,14 +126,20 @@ export function startServer(sentry, config, baseAutoTags) {
         });
     };
     const reapStaleSession = (sessionId, record) => {
-        void closeCurrentTurn(record).catch(() => { });
-        for (const [, pending] of record.pendingTools) {
+        sentry.withIsolationScope((scope) => {
+            scope.setConversationId(sessionId);
             try {
-                pending.span.end();
+                void closeCurrentTurn(record).catch(() => { });
             }
             catch { /* ignore */ }
-        }
-        record.pendingTools.clear();
+            for (const [, pending] of record.pendingTools) {
+                try {
+                    pending.span.end();
+                }
+                catch { /* ignore */ }
+            }
+            record.pendingTools.clear();
+        });
         sessions.delete(sessionId);
     };
     const closeCurrentTurn = async (record) => {
@@ -469,26 +475,30 @@ export function startServer(sentry, config, baseAutoTags) {
     };
     async function handleEvent(event) {
         touchSession(event);
-        switch (event.hook_event_name) {
-            case "SessionStart":
-                await handleSessionStart(event);
-                return;
-            case "UserPromptSubmit":
-                handleUserPrompt(event);
-                return;
-            case "PreToolUse":
-                handlePreTool(event);
-                return;
-            case "PostToolUse":
-                handlePostTool(event);
-                return;
-            case "SessionEnd":
-                await handleSessionEnd(event);
-                return;
-            case "Stop":
-            case "PreCompact":
-                return;
-        }
+        await sentry.withIsolationScope(async (scope) => {
+            if (event.session_id)
+                scope.setConversationId(event.session_id);
+            switch (event.hook_event_name) {
+                case "SessionStart":
+                    await handleSessionStart(event);
+                    return;
+                case "UserPromptSubmit":
+                    handleUserPrompt(event);
+                    return;
+                case "PreToolUse":
+                    handlePreTool(event);
+                    return;
+                case "PostToolUse":
+                    handlePostTool(event);
+                    return;
+                case "SessionEnd":
+                    await handleSessionEnd(event);
+                    return;
+                case "Stop":
+                case "PreCompact":
+                    return;
+            }
+        });
     }
     const server = createServer((req, res) => {
         if (req.method === "GET" && req.url === "/health") {
@@ -637,5 +647,10 @@ export function startServer(sentry, config, baseAutoTags) {
     };
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
-    return { close: shutdown, emitHeartbeat };
+    const forceReap = () => {
+        for (const [sid, record] of sessions) {
+            reapStaleSession(sid, record);
+        }
+    };
+    return { close: shutdown, emitHeartbeat, forceReap };
 }
