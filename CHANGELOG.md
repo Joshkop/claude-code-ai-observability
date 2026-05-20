@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.11] - 2026-05-20
+
+### Added
+
+- **Sentry Conversations support.** `gen_ai.conversation.id` (= Claude Code `sessionId`) is now emitted on every span in a turn's call tree — turn root, chat children, subagent wrappers, the synthesized subagent chat child, and tool spans — so Sentry's new Conversations view groups the full session under one row.
+- **`gen_ai.agent.name` on synthesized chat children.** Turn-level chat children carry `claude-code`; subagent chat children carry the `subagent_type`. Lets Sentry filter, group, and alert on chat spans per agent (not just on the `invoke_agent` wrappers).
+- **Estimated reasoning tokens for extended-thinking runs.** When transcript turns or sidechains contain `thinking` content blocks, the collector emits `gen_ai.usage.output_tokens.reasoning` estimated as `ceil(chars/4)` per thinking block. Always paired with `claude_code.reasoning_tokens.estimated=true` so the heuristic is identifiable. Sentry's cost panel applies its reasoning rate when this attribute is present.
+- **README sampling guidance.** New section recommending the default `tracesSampleRate: 1.0` for AI traces, citing Sentry's head-based-sampling rationale.
+
+## [0.1.10] - 2026-05-08
+
+### Fixed
+
+- **`developer` tag now propagates to every span in a trace, not just `gen_ai.invoke_agent`.** Previously the user-configured tag was applied via `span.setAttribute` on the per-turn root transaction, which does not propagate to child spans — so Sentry queries like `span.op:gen_ai.chat developer:<name>` and `span.op:gen_ai.execute_tool developer:<name>` returned zero results. Fix: in `startCollector` (`src/index.ts`), promote every entry in `config.tags` to the Sentry isolation scope via `Sentry.setTag(k, v)` immediately after `Sentry.init` and before any spans are created. Tags on the isolation scope are inherited by every subsequent span in the session. Dev-name resolution is unchanged (still pulled from `config.tags.developer` populated by the setup skill); no `gen_ai.*` attributes were touched. Linear: DEV2-1.
+
 ## [0.1.7] - 2026-04-27
 
 ### Fixed
