@@ -16,6 +16,13 @@ export interface TurnTokens {
   model: string | null;
   prompt: string | null;
   response: string | null;
+  /** Estimated reasoning (thinking) tokens summed from transcript thinking
+   *  blocks. Anthropic's usage record does not break thinking out of
+   *  output_tokens, so this is a heuristic (ceil(chars/4)) per thinking
+   *  block. When present, callers MUST also emit
+   *  claude_code.reasoning_tokens.estimated=true. */
+  reasoningTokens?: number;
+  reasoningEstimated?: boolean;
 }
 
 export interface Totals {
