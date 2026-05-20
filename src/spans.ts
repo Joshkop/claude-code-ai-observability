@@ -94,6 +94,7 @@ export function closeTurnSpan(
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.system": "anthropic",
+        "gen_ai.agent.name": "claude-code",
         ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
         ...(sessionId ? { "claude_code.session_id": sessionId } : {}),
         ...(respModel ? { "gen_ai.request.model": respModel } : {}),
@@ -111,6 +112,18 @@ export function closeTurnSpan(
   if (tokens.cacheCreationTokens) {
     // Sentry-python's canonical name for Anthropic prompt-cache writes.
     chatSpan.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cacheCreationTokens);
+  }
+  if (tokens.reasoningTokens && tokens.reasoningTokens > 0) {
+    chatSpan.setAttribute(
+      "gen_ai.usage.output_tokens.reasoning",
+      tokens.reasoningTokens,
+    );
+    if (tokens.reasoningEstimated) {
+      chatSpan.setAttribute(
+        "claude_code.reasoning_tokens.estimated",
+        true,
+      );
+    }
   }
   if (config.recordOutputs && response) {
     chatSpan.setAttribute(
