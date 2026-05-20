@@ -30,15 +30,15 @@ Claude Code plugin that instruments sessions as realtime Sentry traces. Each use
 ## For AI Agents
 
 ### Working In This Directory
-- Source of truth is `src/*.ts`. The compiled `scripts/*.js` siblings are build artifacts produced by `npm run build` (`tsc -p tsconfig.json`). Do **not** hand-edit JS in `scripts/` — edit the matching `.ts` and rebuild.
-- `scripts/hook.sh`, `scripts/doctor.sh`, `scripts/smoke-test.sh`, `scripts/package.json`, `scripts/package-lock.json` are NOT generated — they are real source files committed in `scripts/`.
+- Source of truth is `src/*.ts`. The compiled `scripts/*.js` siblings are build artifacts produced by `pnpm run build` (`tsc -p tsconfig.json`). Do **not** hand-edit JS in `scripts/` — edit the matching `.ts` and rebuild.
+- `scripts/hook.sh`, `scripts/doctor.sh`, `scripts/smoke-test.sh`, `scripts/package.json`, `scripts/pnpm-lock.yaml` are NOT generated — they are real source files committed in `scripts/`.
 - The plugin is loaded from `${CLAUDE_PLUGIN_ROOT}` at session start; restart Claude Code after upgrades.
 
 ### Testing Requirements
-- `npm test` — vitest run (no watch).
-- `npm run build` — typecheck + emit JS.
-- `npm run smoke` — end-to-end smoke test against a running collector.
-- `npm run ci` — typecheck (`tsc --noEmit`) + tests + smoke. Run before release.
+- `pnpm test` — vitest run (no watch).
+- `pnpm run build` — typecheck + emit JS.
+- `pnpm run smoke` — end-to-end smoke test against a running collector.
+- `pnpm run ci` — typecheck (`tsc --noEmit`) + tests + smoke. Run before release.
 
 ### Common Patterns
 - ES modules (`"type": "module"`); imports use `.js` extensions even from `.ts` files.

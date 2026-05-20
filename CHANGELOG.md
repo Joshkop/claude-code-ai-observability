@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.4] - 2026-05-20
+
+### Changed
+
+- **Switched dev workflow and CI from npm to pnpm.** Motivated by recent npm supply-chain incidents; pnpm's content-addressable store and stricter dependency isolation reduce blast radius.
+  - Root and `scripts/` now use `pnpm-lock.yaml` (no `package-lock.json`).
+  - `packageManager: "pnpm@10.9.0"` field added to both `package.json` files so Corepack auto-resolves the right pnpm version on user machines.
+  - CI workflow (`.github/workflows/ci.yml`) installs pnpm via `pnpm/action-setup@v4`, uses `pnpm install --frozen-lockfile`, and runs `pnpm run` for build/test/smoke.
+  - Plugin `postinstall` script uses `corepack pnpm install --prod --frozen-lockfile`, so end-users installing via Claude Code's `/plugin install` get a deterministic pnpm-backed dep tree without needing pnpm on their PATH (Corepack is bundled with Node ≥ 16.13).
+  - README and AGENTS.md updated to reference `pnpm` instead of `npm`.
+
+No behavior change to emitted spans, runtime hooks, or any plugin attribute. This is a build/distribution-system change only.
+
 ## [0.2.3] - 2026-05-20
 
 ### Added
