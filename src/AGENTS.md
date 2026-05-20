@@ -26,14 +26,14 @@ TypeScript source for the observability plugin. Splits cleanly between the **hoo
 ## For AI Agents
 
 ### Working In This Directory
-- Edits here require `npm run build` to take effect — the runtime loads compiled `scripts/*.js`.
+- Edits here require `pnpm run build` to take effect — the runtime loads compiled `scripts/*.js`.
 - Keep imports using `.js` extensions (NodeNext ESM resolution) even for `.ts` siblings.
 - Hot path is `hook-client.ts` → `server.ts`. The hook client must stay fast (sub-second) and never block Claude Code; the 500 ms health-probe timeout is load-bearing on WSL2.
 - Per-turn semantics live in `spans.ts` + `server.ts`: a turn opens at `UserPromptSubmit` and closes at the next `UserPromptSubmit` or `SessionEnd`.
 
 ### Testing Requirements
 - Every module has a sibling test in `tests/` (e.g. `cost.ts` ↔ `tests/cost.test.ts`). Add tests there when changing behavior.
-- Type changes: run `tsc --noEmit` (or `npm run ci`).
+- Type changes: run `tsc --noEmit` (or `pnpm run ci`).
 
 ### Common Patterns
 - Defensive try/catch around all OS-level probes (`os.userInfo`, git, tmux) — degrade by omission, never throw into a hook.

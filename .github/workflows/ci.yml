@@ -10,18 +10,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.9.0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm ci
-      - run: npx tsc --noEmit
-      - run: npm test
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm test
       - name: build
-        run: npm run build
+        run: pnpm run build
       - name: assert scripts/*.js is in sync with src/
         run: |
           if ! git diff --quiet --exit-code -- 'scripts/*.js'; then
-            echo "::error::scripts/*.js is out of sync with src/. Run 'npm run build' and commit the result."
+            echo "::error::scripts/*.js is out of sync with src/. Run 'pnpm run build' and commit the result."
             git diff -- 'scripts/*.js'
             exit 1
           fi

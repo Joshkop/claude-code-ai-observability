@@ -44,7 +44,7 @@ The bundled setup skill walks you through it: paste your Sentry DSN (Sentry → 
 ```bash
 git clone https://github.com/Joshkop/claude-code-ai-observability
 cd claude-code-ai-observability
-npm install
+pnpm install
 ```
 
 Then register the hooks in your Claude Code settings (`.claude/settings.json`):
