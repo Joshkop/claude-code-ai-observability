@@ -10,30 +10,40 @@ function applyTags(span, tags, userTags) {
     }
 }
 export function openTurnTransaction(sentry, sessionId, turnIndex, prompt, tags, config, model, startTime) {
-    const span = sentry.startInactiveSpan({
+    const root = sentry.startInactiveSpan({
+        op: "claude_code.turn",
+        name: `turn ${turnIndex}`,
+        forceTransaction: true,
+        startTime,
+        attributes: {
+            "claude_code.session_id": sessionId,
+            "claude_code.turn_index": turnIndex,
+            "gen_ai.conversation.id": sessionId,
+        },
+    });
+    applyTags(root, tags, config.tags);
+    const agent = sentry.withActiveSpan(root, () => sentry.startInactiveSpan({
         op: "gen_ai.invoke_agent",
         name: "invoke_agent claude-code",
-        forceTransaction: true,
         startTime,
         attributes: {
             "gen_ai.agent.name": "claude-code",
             "gen_ai.provider.name": "anthropic",
-            "gen_ai.system": "anthropic",
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.conversation.id": sessionId,
             "claude_code.session_id": sessionId,
             "claude_code.turn_index": turnIndex,
             ...(model ? { "gen_ai.request.model": model } : {}),
         },
-    });
-    applyTags(span, tags, config.tags);
+    }));
     if (config.recordInputs && prompt) {
         const messages = serialize([{ role: "user", content: prompt }], config.maxAttributeLength);
-        span.setAttribute("gen_ai.request.messages", messages);
+        agent.setAttribute("gen_ai.request.messages", messages);
     }
-    return span;
+    return { root, agent };
 }
-export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
+export function closeTurnSpan(sentry, turnSpans, input, config, endTime) {
+    const { root: rootSpan, agent: turnSpan } = turnSpans;
     const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus } = input;
     const respModel = responseModel ?? tokens.model ?? undefined;
     // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
@@ -49,7 +59,6 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
         attributes: {
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": "anthropic",
-            "gen_ai.system": "anthropic",
             "gen_ai.agent.name": "claude-code",
             ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
             ...(sessionId ? { "claude_code.session_id": sessionId } : {}),
@@ -105,7 +114,22 @@ export function closeTurnSpan(sentry, turnSpan, input, config, endTime) {
         // Comma-joined string — Sentry attribute values must be primitive.
         turnSpan.setAttribute("claude_code.turn.tools_used", toolsUsed.join(","));
     }
+    // Mirror per-turn rollups onto the transaction root so Trace Explorer
+    // surfaces them on the row, not buried in the invoke_agent child.
+    if (typeof toolCount === "number") {
+        rootSpan.setAttribute("claude_code.turn.tool_count", toolCount);
+    }
+    if (typeof subagentCount === "number") {
+        rootSpan.setAttribute("claude_code.turn.subagent_count", subagentCount);
+    }
+    if (toolsUsed && toolsUsed.length) {
+        rootSpan.setAttribute("claude_code.turn.tools_used", toolsUsed.join(","));
+    }
+    if (cost) {
+        rootSpan.setAttribute("conversation.cost_estimate_usd", cost.totalCost);
+    }
     turnSpan.end(endTime);
+    rootSpan.end(endTime);
 }
 export function createToolSpan(sentry, parentSpan, toolName, input, config, startTime, toolUseId, sessionId) {
     const start = () => {

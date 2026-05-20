@@ -162,8 +162,11 @@ describe("server lifecycle: per-turn transaction model", () => {
       prompt: "first prompt",
     });
     expect(r.ok).toBe(true);
+    // The transaction root is the claude_code.turn wrapper; gen_ai.invoke_agent
+    // is a child so Sentry's extractGenAiSpansFromEvent picks it up into the
+    // v2 standalone stream that AI Conversations reads from.
     const turnTransactions = () =>
-      sentry.spans.filter((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      sentry.spans.filter((s) => s.op === "claude_code.turn" && s.forceTransaction === true);
     expect(turnTransactions()).toHaveLength(1);
     expect(turnTransactions()[0].attrs["claude_code.turn_index"]).toBe(0);
     expect(turnTransactions()[0].attrs["claude_code.session_id"]).toBe(sessionId);
@@ -305,9 +308,9 @@ describe("server: per-session git cwd (C4)", () => {
       });
       await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "c4", prompt: "hi" });
 
-      const turn = sentry.spans.find(
-        (s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true,
-      );
+      // Auto-tags live on the transaction root (claude_code.turn), not the
+      // gen_ai.invoke_agent child — keeps the v2 standalone span lean.
+      const turn = sentry.spans.find((s) => s.op === "claude_code.turn");
       expect(turn).toBeTruthy();
       expect(turn!.attrs["vcs.ref.head.name"]).toBe(branch);
     } finally {
@@ -345,7 +348,7 @@ describe("server: lazy session synthesis (R2)", () => {
       // NOTE: NO SessionStart dispatched.
       await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1", _aiobs: { context: { cwd: dir } } });
       await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
-      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
       expect(turn).toBeTruthy();
       expect(turn!.attrs["claude_code.session.synthesized"]).toBe(true);
     } finally {
@@ -377,7 +380,7 @@ describe("server: dropped attr + heartbeat (R3/R4)", () => {
       hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x",
       _aiobs: { dropped_since_last: 4 },
     });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.dropped_since_last"]).toBe(4);
   });
@@ -450,7 +453,7 @@ describe("server: slash-command attribution (N2)", () => {
   it("sets claude_code.command.name/plugin from a namespaced command", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sc" });
     await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc", prompt: "/superpowers:writing-plans go" });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.command.name"]).toBe("writing-plans");
     expect(turn!.attrs["claude_code.command.plugin"]).toBe("superpowers");
@@ -459,7 +462,7 @@ describe("server: slash-command attribution (N2)", () => {
   it("does not set command attrs for a normal prompt", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sc2" });
     await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc2", prompt: "just a normal prompt" });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
   });

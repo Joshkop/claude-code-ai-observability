@@ -15,6 +15,18 @@ function applyTags(span: Span, tags: AutoTags, userTags: Record<string, string>)
   }
 }
 
+export interface TurnSpans {
+  /** Per-turn transaction root. Carries claude_code.* attributes and is what
+   *  the Trace Explorer surfaces as one row per turn. */
+  root: Span;
+  /** gen_ai.invoke_agent span nested under the root. Sentry's
+   *  extractGenAiSpansFromEvent only pulls descendants into the v2 standalone
+   *  stream that the "AI Conversations" view reads — the root transaction
+   *  itself is filtered out. Wrapping invoke_agent inside `root` is what
+   *  makes it eligible for extraction and surfaces it in Conversations. */
+  agent: Span;
+}
+
 export function openTurnTransaction(
   sentry: SentryNs,
   sessionId: string,
@@ -24,32 +36,44 @@ export function openTurnTransaction(
   config: ResolvedPluginConfig,
   model?: string,
   startTime?: number,
-): Span {
-  const span = sentry.startInactiveSpan({
-    op: "gen_ai.invoke_agent",
-    name: "invoke_agent claude-code",
+): TurnSpans {
+  const root = sentry.startInactiveSpan({
+    op: "claude_code.turn",
+    name: `turn ${turnIndex}`,
     forceTransaction: true,
     startTime,
     attributes: {
-      "gen_ai.agent.name": "claude-code",
-      "gen_ai.provider.name": "anthropic",
-      "gen_ai.system": "anthropic",
-      "gen_ai.operation.name": "invoke_agent",
-      "gen_ai.conversation.id": sessionId,
       "claude_code.session_id": sessionId,
       "claude_code.turn_index": turnIndex,
-      ...(model ? { "gen_ai.request.model": model } : {}),
+      "gen_ai.conversation.id": sessionId,
     },
   });
-  applyTags(span, tags, config.tags);
+  applyTags(root, tags, config.tags);
+
+  const agent = sentry.withActiveSpan(root, () =>
+    sentry.startInactiveSpan({
+      op: "gen_ai.invoke_agent",
+      name: "invoke_agent claude-code",
+      startTime,
+      attributes: {
+        "gen_ai.agent.name": "claude-code",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.conversation.id": sessionId,
+        "claude_code.session_id": sessionId,
+        "claude_code.turn_index": turnIndex,
+        ...(model ? { "gen_ai.request.model": model } : {}),
+      },
+    }),
+  );
   if (config.recordInputs && prompt) {
     const messages = serialize(
       [{ role: "user", content: prompt }],
       config.maxAttributeLength,
     );
-    span.setAttribute("gen_ai.request.messages", messages);
+    agent.setAttribute("gen_ai.request.messages", messages);
   }
-  return span;
+  return { root, agent };
 }
 
 export interface CloseTurnInput {
@@ -74,11 +98,12 @@ export interface CloseTurnInput {
 
 export function closeTurnSpan(
   sentry: SentryNs,
-  turnSpan: Span,
+  turnSpans: TurnSpans,
   input: CloseTurnInput,
   config: ResolvedPluginConfig,
   endTime?: number,
 ): void {
+  const { root: rootSpan, agent: turnSpan } = turnSpans;
   const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus } = input;
   const respModel = responseModel ?? tokens.model ?? undefined;
 
@@ -96,7 +121,6 @@ export function closeTurnSpan(
       attributes: {
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "anthropic",
-        "gen_ai.system": "anthropic",
         "gen_ai.agent.name": "claude-code",
         ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
         ...(sessionId ? { "claude_code.session_id": sessionId } : {}),
@@ -169,7 +193,22 @@ export function closeTurnSpan(
     // Comma-joined string — Sentry attribute values must be primitive.
     turnSpan.setAttribute("claude_code.turn.tools_used", toolsUsed.join(","));
   }
+  // Mirror per-turn rollups onto the transaction root so Trace Explorer
+  // surfaces them on the row, not buried in the invoke_agent child.
+  if (typeof toolCount === "number") {
+    rootSpan.setAttribute("claude_code.turn.tool_count", toolCount);
+  }
+  if (typeof subagentCount === "number") {
+    rootSpan.setAttribute("claude_code.turn.subagent_count", subagentCount);
+  }
+  if (toolsUsed && toolsUsed.length) {
+    rootSpan.setAttribute("claude_code.turn.tools_used", toolsUsed.join(","));
+  }
+  if (cost) {
+    rootSpan.setAttribute("conversation.cost_estimate_usd", cost.totalCost);
+  }
   turnSpan.end(endTime);
+  rootSpan.end(endTime);
 }
 
 export function createToolSpan(
