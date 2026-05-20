@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] - 2026-05-20
+
+### Added
+
+- **Mid-session self-heal.** `ensureServerRunning` now runs on every hook event, not just `SessionStart`. After `/plugin update`, the next hook event detects the version mismatch, kills the stale collector, and spawns the new one — no user intervention needed.
+- **`claude_code.collector.respawned_from_version`** tag, set on every span for the first 60 seconds after a self-heal respawn. Makes the upgrade observable directly in Sentry (filter for `has:claude_code.collector.respawned_from_version`).
+- **`claude_code.token_extraction.status`** diagnostic attribute on `gen_ai.chat` children. Values: `ok`, `ok|matched_after_retry`, `transcript_missing`, `no_matching_turn`, `turn_had_no_usage`. Quantifies in Sentry queries why a turn produced zero tokens.
+- **Late-flush retry.** When `closeCurrentTurn` finds a matched turn with zero usage, the collector sleeps 200 ms and re-reads the transcript once before emitting. Mitigates the hypothesised cause of recent zero-token chat spans on otherwise normal turns.
+
 ## [0.2.2] - 2026-05-20
 
 ### Added
