@@ -16,8 +16,10 @@ interface FakeSpan {
 
 function makeFakeSentry() {
   const spans: FakeSpan[] = [];
+  const conversationIdCalls: Array<string | null | undefined> = [];
   return {
     spans,
+    conversationIdCalls,
     startInactiveSpan(opts: {
       op?: string;
       name?: string;
@@ -40,6 +42,14 @@ function makeFakeSentry() {
     },
     withActiveSpan<T>(_parent: unknown, fn: () => T): T {
       return fn();
+    },
+    withIsolationScope<T>(fn: (scope: { setConversationId(id: string | null | undefined): void }) => T): T {
+      const scope = {
+        setConversationId: (id: string | null | undefined) => {
+          conversationIdCalls.push(id);
+        },
+      };
+      return fn(scope);
     },
     flush: async () => true,
   };
