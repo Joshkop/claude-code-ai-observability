@@ -134,6 +134,10 @@ export interface SidechainUsage {
   endTime?: number;
   /** Number of assistant turns recorded in this sidechain transcript. */
   assistantTurnCount: number;
+  /** Estimated reasoning tokens summed from thinking blocks across all
+   *  assistant messages in this sidechain. See note in TurnTokens. */
+  reasoningTokens?: number;
+  reasoningEstimated?: boolean;
 }
 
 interface SidechainLine extends TranscriptLine {
@@ -163,6 +167,7 @@ export function extractSidechainUsage(filePath: string): SidechainUsage | null {
   let startTime: number | undefined;
   let endTime: number | undefined;
   let assistantTurnCount = 0;
+  let reasoningTokens = 0;
   let any = false;
 
   for (const line of raw.split("\n")) {
@@ -194,6 +199,7 @@ export function extractSidechainUsage(filePath: string): SidechainUsage | null {
         outputTokens += output;
       }
       if (parsed.message?.model) model = parsed.message.model;
+      reasoningTokens += estimateReasoningTokensFromContent(parsed.message?.content);
     }
   }
   if (!any) return null;
@@ -206,6 +212,9 @@ export function extractSidechainUsage(filePath: string): SidechainUsage | null {
     startTime,
     endTime,
     assistantTurnCount,
+    ...(reasoningTokens > 0
+      ? { reasoningTokens, reasoningEstimated: true }
+      : {}),
   };
 }
 

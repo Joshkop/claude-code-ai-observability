@@ -214,3 +214,67 @@ describe("extractSidechainUsage", () => {
     expect(extractSidechainUsage("/no/such/file.jsonl")).toBeNull();
   });
 });
+
+describe("extractSidechainUsage reasoning tokens", () => {
+  const files: string[] = [];
+  function make(content: string): string {
+    const p = tmpFile(content);
+    files.push(p);
+    return p;
+  }
+  afterEach(() => {
+    for (const f of files.splice(0)) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+  });
+
+  it("aggregates reasoning tokens across assistant messages", () => {
+    const p = make(
+      JSON.stringify({ type: "user", isSidechain: true, message: { content: "go" }, timestamp: "2026-05-20T00:00:00Z" }) + "\n" +
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-20T00:00:05Z",
+        message: {
+          model: "claude-sonnet-4-6",
+          usage: { input_tokens: 5, output_tokens: 20 },
+          content: [
+            { type: "thinking", thinking: "x".repeat(20) }, // 5 tokens
+            { type: "text", text: "ok" },
+          ],
+        },
+      }) + "\n" +
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-20T00:00:10Z",
+        message: {
+          model: "claude-sonnet-4-6",
+          usage: { input_tokens: 5, output_tokens: 20 },
+          content: [
+            { type: "thinking", thinking: "y".repeat(12) }, // 3 tokens
+          ],
+        },
+      }) + "\n"
+    );
+    const usage = extractSidechainUsage(p);
+    expect(usage).not.toBeNull();
+    expect(usage!.reasoningTokens).toBe(8);
+    expect(usage!.reasoningEstimated).toBe(true);
+  });
+
+  it("leaves reasoning fields undefined when no thinking blocks", () => {
+    const p = make(
+      JSON.stringify({ type: "user", isSidechain: true, message: { content: "go" } }) + "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          usage: { input_tokens: 5, output_tokens: 20 },
+          content: [{ type: "text", text: "ok" }],
+        },
+      }) + "\n"
+    );
+    const usage = extractSidechainUsage(p);
+    expect(usage!.reasoningTokens).toBeUndefined();
+    expect(usage!.reasoningEstimated).toBeUndefined();
+  });
+});
