@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
 import os from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type * as SentryNS from "@sentry/node";
 import { loadConfig, resolveDefaults } from "./config.js";
 import { startServer } from "./server.js";
@@ -96,7 +98,21 @@ async function main(): Promise<void> {
   await startCollector(config);
 }
 
-main().catch((err) => {
-  process.stderr.write(`collector failed: ${(err as Error).message ?? err}\n`);
-  process.exit(1);
-});
+// Only auto-run main() when this module is the process entry point. Importing
+// it from tests (or any other code) must NOT spawn the collector or trigger
+// process.exit — under vitest those calls are intercepted and re-thrown,
+// which then cascades into a second process.exit(1) and crashes the test run.
+const isEntry = (() => {
+  try {
+    return process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (isEntry) {
+  main().catch((err) => {
+    process.stderr.write(`collector failed: ${(err as Error).message ?? err}\n`);
+    process.exit(1);
+  });
+}

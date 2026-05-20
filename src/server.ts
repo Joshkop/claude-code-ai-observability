@@ -659,7 +659,14 @@ export function startServer(
       // We never started listening, so no PID file was written — but call
       // removePidFile defensively in case a sibling's cleanup missed.
       removePidFile();
-      process.exit(2);
+      // Re-throw so Node's default uncaughtException behavior terminates the
+      // process with a non-zero exit code and the original EADDRINUSE message.
+      // Previously this was process.exit(2), which under vitest gets
+      // re-thrown as a generic "process.exit unexpectedly called" error and
+      // captured by our installGlobalHandlers as a Sentry issue
+      // (CLAUDE-CODE-1 / DEV2-2). Throwing preserves the real error context
+      // and avoids the test-pollution loop.
+      throw err;
     }
   });
 
