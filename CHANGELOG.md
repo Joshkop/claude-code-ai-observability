@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.6] - 2026-05-20
+
+### Fixed
+
+- **Sentry Conversations view now actually populates.** 0.2.5 enabled `streamGenAiSpans: true` but the Conversations view stayed empty because Sentry's pipeline reads conversation id from the SDK *scope* (`Sentry.setConversationId(...)`), not from the per-span `gen_ai.conversation.id` attribute alone. Every hook event handler now runs inside `Sentry.withIsolationScope` and calls `scope.setConversationId(event.session_id)` on entry; the stale-session reaper does the same. Spans created/ended inside that scope carry the conversation id into v2 envelope items.
+
+The manual `gen_ai.conversation.id` span attribute (added in 0.2.2) stays — it is redundant with scope-based propagation once streamGenAiSpans is working, but keeps existing Discover queries and dashboards intact.
+
 ## [0.2.5] - 2026-05-20
 
 ### Fixed
