@@ -47,6 +47,36 @@ export function captureBreadcrumb(sentry: SentryLike, input: BreadcrumbInput): v
   }
 }
 
+// R3: delivery-loss notice. Distinct from captureBreadcrumb (which is
+// tool-error-shaped and PostToolUse-specific) — dropped events can ride on
+// any hook, so this carries only the loss count + session identity.
+export function captureDroppedBreadcrumb(
+  sentry: SentryLike,
+  input: { dropped: number; session?: { sessionId?: string; sessionName?: string } },
+): void {
+  const fn = (sentry as unknown as {
+    addBreadcrumb?: (b: unknown) => void;
+  }).addBreadcrumb;
+  if (typeof fn !== "function") return;
+
+  const data: Record<string, unknown> = {
+    "claude_code.dropped_since_last": input.dropped,
+  };
+  if (input.session?.sessionId) data["claude_code.session_id"] = input.session.sessionId;
+  if (input.session?.sessionName) data["claude_code.session_name"] = input.session.sessionName;
+
+  try {
+    fn.call(sentry, {
+      category: "claude_code.delivery",
+      level: "warning",
+      message: `dropped_since_last: ${input.dropped}`,
+      data,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 function coerceMessage(value: unknown, max: number): string | null {
   if (value == null) return null;
   let s: string;

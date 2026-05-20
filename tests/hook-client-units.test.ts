@@ -9,10 +9,10 @@
  * We do NOT test the spawn path (ensureServerRunning) to avoid child-process
  * side effects in tests.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
-import { probeHealth, readPidFile } from "../src/hook-client.js";
+import { probeHealth, readPidFile, sendHookEvent, _droppedCountPath, readDroppedCount, incrementDroppedCount, resetDroppedCount } from "../src/hook-client.js";
 import { PID_FILE, CACHE_DIR, PLUGIN_VERSION } from "../src/plugin-meta.js";
 
 // ---------------------------------------------------------------------------
@@ -227,5 +227,43 @@ describe("readPidFile: returns correct data for a well-formed file", () => {
   it("returns an object with the correct startedAt timestamp", () => {
     const result = readPidFile();
     expect(result?.startedAt).toBe(sample.startedAt);
+  });
+});
+
+describe("R1 — sendHookEvent retry-once", () => {
+  it("retries exactly once when the first POST rejects, then succeeds", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => { calls.push("a"); return Promise.reject(new Error("boom")); })
+      .mockImplementationOnce(() => { calls.push("b"); return Promise.resolve(new Response("{}", { status: 200 })); });
+    vi.stubGlobal("fetch", fetchMock);
+    await sendHookEvent({ hook_event_name: "Stop", session_id: "s" } as never, 19877);
+    expect(calls).toEqual(["a", "b"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not throw when both attempts fail", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
+    await expect(
+      sendHookEvent({ hook_event_name: "Stop", session_id: "s" } as never, 19877),
+    ).resolves.toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("R3 — dropped-event counter round-trip", () => {
+  afterEach(() => {
+    try { rmSync(_droppedCountPath(), { force: true }); } catch { /* ignore */ }
+  });
+  it("increments and resets a persistent counter", () => {
+    resetDroppedCount();
+    expect(readDroppedCount()).toBe(0);
+    incrementDroppedCount();
+    incrementDroppedCount();
+    expect(readDroppedCount()).toBe(2);
+    resetDroppedCount();
+    expect(readDroppedCount()).toBe(0);
+    expect(existsSync(_droppedCountPath())).toBe(false);
   });
 });

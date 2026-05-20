@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.11] - 2026-05-20
+## [0.2.2] - 2026-05-20
 
 ### Added
 
@@ -12,6 +12,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`gen_ai.agent.name` on synthesized chat children.** Turn-level chat children carry `claude-code`; subagent chat children carry the `subagent_type`. Lets Sentry filter, group, and alert on chat spans per agent (not just on the `invoke_agent` wrappers).
 - **Estimated reasoning tokens for extended-thinking runs.** When transcript turns or sidechains contain `thinking` content blocks, the collector emits `gen_ai.usage.output_tokens.reasoning` estimated as `ceil(chars/4)` per thinking block. Always paired with `claude_code.reasoning_tokens.estimated=true` so the heuristic is identifiable. Sentry's cost panel applies its reasoning rate when this attribute is present.
 - **README sampling guidance.** New section recommending the default `tracesSampleRate: 1.0` for AI traces, citing Sentry's head-based-sampling rationale.
+
+## [0.2.1] - 2026-05-18
+
+### Fixed
+
+- **`gen_ai.usage.input_tokens` now includes cached tokens, per Sentry's AI
+  Agents schema.** v0.2.0 emitted non-cached input only, which made Sentry's
+  server-side `gen_ai.cost.*` go negative (`(input_tokens - cached) * rate`
+  with `cached > input_tokens`). Cached/cache-write remain informational
+  subsets; `total_tokens` = input + output. No dashboard migration needed —
+  token semantics now match pre-0.2.0 and Sentry.
+- **Flaky CI:** parallel vitest workers shared one global
+  `~/.cache/.../collector.pid`, so real-server tests raced on it. `CACHE_DIR`
+  (and `PID_FILE`) are now overridable via `CLAUDE_AIOBS_CACHE_DIR` /
+  `CLAUDE_AIOBS_PID_FILE`; each test worker gets an isolated cache dir.
+
+## [0.2.0] - 2026-05-15
+
+### Changed (behavior — read the migration note)
+
+- **BREAKING (numbers, not API): per-turn token/cost is now correctly
+  segmented (C1).** Tool-result user lines no longer start phantom turns;
+  per-turn values shift to correct. See `docs/sentry-dashboard-migration.md`.
+
+### Fixed
+
+- **Cost model matching (C3):** exact → date-stripped prefix → family
+  heuristic → unpriced. Unpriced turns set `claude_code.cost.unpriced_model`.
+- **Per-session git/cwd (C4):** git detection runs against the session's own
+  cwd, not the long-lived collector's `process.cwd()`.
+- **Parallel same-type subagents (C5):** sidechain transcripts matched by
+  `.meta.json` name+description; mtime/agentType are tiebreakers only.
+- **Cross-session subagent misattribution (C5/N5):** active subagents keyed
+  per `session_id`; nested subagents parent to their enclosing wrapper.
+- **Soft-fail transcript parsing (C6):** unrecognized JSONL falls back to
+  legacy positional behavior and sets `claude_code.transcript.parse_degraded`.
+
+### Added
+
+- **Reliability:** retry-once + 1000ms hook timeout (R1); lazy session
+  synthesis with `claude_code.session.synthesized` (R2); dropped-event
+  counter piggybacked as `claude_code.dropped_since_last` (R3);
+  `claude_code.collector.heartbeat` span on the flush tick (R4).
+- **Attribution:** MCP server (N1), skill & slash-command (N2), subagent
+  source-class + telemetry incl. `claude_code.subagent.source_inferred` (N3),
+  cheap session dimensions `claude_code.permission_mode` / `agent_name` /
+  `entrypoint` (N4).
+- **`docs/sentry-dashboard-migration.md`** — corrected semantics + queries.
 
 ## [0.1.10] - 2026-05-08
 

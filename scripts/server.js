@@ -2,12 +2,13 @@ import { createServer } from "node:http";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { reportPluginError } from "./sentry-errors.js";
 import { closeTurnSpan, createToolSpan, openTurnTransaction, } from "./spans.js";
-import { extractPerTurnTokens } from "./transcript.js";
+import { readTranscript, selectTurn } from "./transcript-reader.js";
 import { detectContext } from "./context.js";
 import { attachSubagentToEvent, createSubagentSession, findActiveSubagentSpan } from "./subagent.js";
 import { computeCost, loadPriceTable } from "./cost.js";
-import { applyToolError, captureBreadcrumb } from "./errors.js";
+import { applyToolError, captureBreadcrumb, captureDroppedBreadcrumb } from "./errors.js";
 import { serialize } from "./serialize.js";
+import { parseMcpTool, parseSkillInput, parseSlashCommand } from "./attribution.js";
 import { CACHE_DIR, PID_FILE, PLUGIN_VERSION, } from "./plugin-meta.js";
 const DEFAULT_PORT = 19877;
 const FLUSH_INTERVAL_MS = 30_000;
@@ -84,13 +85,18 @@ function send(res, status, body, contentType = "text/plain") {
 }
 export function startServer(sentry, config, baseAutoTags) {
     const sessions = new Map();
+    let droppedTotal = 0;
+    const startedAt = Date.now();
     const port = Number(process.env.SENTRY_COLLECTOR_PORT) || DEFAULT_PORT;
     const priceTable = loadPriceTable(null, config);
     const subagentSession = createSubagentSession();
     const handleSessionStart = async (event) => {
         if (sessions.has(event.session_id))
             return;
-        const detected = await detectContext(event.session_id).catch(() => ({}));
+        // C4: derive git/cwd from the session's own cwd (sent live by the
+        // hook-client), never the long-lived collector's process.cwd().
+        const sessionCwd = event._aiobs?.context?.cwd;
+        const detected = await detectContext(event.session_id, sessionCwd).catch(() => ({}));
         const autoTags = {
             ...baseAutoTags,
             ...detected,
@@ -113,6 +119,8 @@ export function startServer(sentry, config, baseAutoTags) {
             transcriptPath: event.transcript_path,
             model: event.model,
             turnIndex: -1,
+            currentPromptId: null,
+            synthesized: false,
             autoTags,
             lastEventAt: Date.now(),
         });
@@ -145,9 +153,17 @@ export function startServer(sentry, config, baseAutoTags) {
             prompt: null,
             response: null,
         };
+        let parseDegraded = false;
+        let sessionDims = {};
         if (record.transcriptPath) {
-            const turns = extractPerTurnTokens(record.transcriptPath);
-            const turn = turns[record.turnIndex];
+            const result = readTranscript(record.transcriptPath);
+            parseDegraded = result.degraded;
+            sessionDims = result.session;
+            // promptId is the primary key; record.turnIndex is the ordinal fallback —
+            // it stays 1:1 with transcript-reader's real-turn index because each
+            // UserPromptSubmit corresponds to exactly one real (non-sidechain,
+            // non-tool_result) user line.
+            const turn = selectTurn(result, record.currentPromptId, record.turnIndex);
             if (turn)
                 tokens = turn;
         }
@@ -160,6 +176,27 @@ export function startServer(sentry, config, baseAutoTags) {
             cacheCreationTokens: tokens.cacheCreationTokens,
             outputTokens: tokens.outputTokens,
         }, priceTable);
+        try {
+            if (cost.unpricedModel) {
+                record.currentTurnSpan.setAttribute("claude_code.cost.unpriced_model", cost.unpricedModel);
+            }
+            if (parseDegraded) {
+                record.currentTurnSpan.setAttribute("claude_code.transcript.parse_degraded", true);
+            }
+            if (record.synthesized) {
+                record.currentTurnSpan.setAttribute("claude_code.session.synthesized", true);
+            }
+            if (sessionDims.permissionMode) {
+                record.currentTurnSpan.setAttribute("claude_code.permission_mode", sessionDims.permissionMode);
+            }
+            if (sessionDims.agentName) {
+                record.currentTurnSpan.setAttribute("claude_code.agent_name", sessionDims.agentName);
+            }
+            if (sessionDims.entrypoint) {
+                record.currentTurnSpan.setAttribute("claude_code.entrypoint", sessionDims.entrypoint);
+            }
+        }
+        catch { /* ignore */ }
         closeTurnSpan(sentry, record.currentTurnSpan, {
             tokens,
             responseModel: record.responseModel ?? record.model,
@@ -173,24 +210,86 @@ export function startServer(sentry, config, baseAutoTags) {
         }, config);
         record.currentTurnSpan = null;
         record.currentTurnStart = null;
+        record.currentPromptId = null;
         record.turnToolCount = 0;
         record.turnSubagentCount = 0;
         record.turnTools.clear();
     };
+    // R2: SessionStart can be missed (collector spawned mid-session or the
+    // event was dropped). Build a minimal record from the event so whole
+    // turns aren't blacked out. Spans get claude_code.session.synthesized.
+    // Note: a late SessionStart for an already-synthesized session is dropped
+    // by handleSessionStart's `sessions.has` guard, so `synthesized` stays
+    // true for its lifetime — accepted (data is degraded, never wrong; the
+    // transcript still carries the model per turn).
+    const getOrCreateSession = (event) => {
+        const sid = event.session_id;
+        const existing = sessions.get(sid);
+        if (existing)
+            return existing;
+        const cwd = event._aiobs?.context?.cwd;
+        const record = {
+            currentTurnSpan: null,
+            currentTurnStart: null,
+            pendingTools: new Map(),
+            toolCount: 0,
+            turnToolCount: 0,
+            turnSubagentCount: 0,
+            turnTools: new Set(),
+            // Only the 3 tool/prompt handlers call this; none carry
+            // transcript_path. handleSessionEnd upgrades it later if it arrives.
+            transcriptPath: undefined,
+            model: undefined,
+            turnIndex: -1,
+            autoTags: {
+                ...baseAutoTags,
+                "claude_code.session_id": sid,
+                ...(cwd ? { "process.cwd": cwd } : {}),
+            },
+            lastEventAt: Date.now(),
+            currentPromptId: null,
+            synthesized: true,
+        };
+        applyClientContext(record.autoTags, event._aiobs?.context);
+        sessions.set(sid, record);
+        return record;
+    };
     const handleUserPrompt = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         closeCurrentTurn(record);
         record.turnIndex += 1;
+        record.currentPromptId = event.prompt_id ?? null;
         const prompt = event.prompt ?? event.message ?? null;
         record.currentTurnStart = Date.now() / 1000;
         record.currentTurnSpan = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
+        // R3: touchSession already counted droppedTotal + emitted the breadcrumb
+        // for this event, but it ran before this turn's span existed (it saw the
+        // prior/closed span or null). Re-stamp the just-opened turn span so the
+        // loss is visible on the turn it actually precedes. No double count: only
+        // the span attribute is repeated here, not droppedTotal/breadcrumb.
+        const droppedNow = event._aiobs?.dropped_since_last;
+        if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
+            try {
+                record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
+            }
+            catch { /* ignore */ }
+        }
+        // N2: a slash command in the prompt → command attribution on the turn.
+        if (prompt) {
+            const cmd = parseSlashCommand(prompt);
+            if (cmd && record.currentTurnSpan) {
+                try {
+                    record.currentTurnSpan.setAttribute("claude_code.command.name", cmd.name);
+                    if (cmd.plugin) {
+                        record.currentTurnSpan.setAttribute("claude_code.command.plugin", cmd.plugin);
+                    }
+                }
+                catch { /* ignore */ }
+            }
+        }
     };
     const handlePreTool = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         // Subagent tools can run for >30 min; keep the parent session fresh so the reaper
         // doesn't harvest it mid-flight. touchSession already bumped at the dispatcher,
         // but this is belt-and-suspenders in case the event shape ever loses session_id.
@@ -218,11 +317,31 @@ export function startServer(sentry, config, baseAutoTags) {
         record.toolCount += 1;
         record.turnToolCount += 1;
         record.turnTools.add(event.tool_name);
+        // N1: MCP server attribution on every tool span.
+        const mcp = parseMcpTool(event.tool_name);
+        if (mcp) {
+            try {
+                span.setAttribute("gen_ai.tool.mcp.server", mcp.server);
+                span.setAttribute("gen_ai.tool.mcp.name", mcp.name);
+                span.setAttribute("claude_code.tool.source", "mcp");
+            }
+            catch { /* ignore */ }
+        }
+        // N2: Skill tool input → skill name/plugin on the tool span.
+        if (event.tool_name === "Skill") {
+            const skill = parseSkillInput(event.tool_input);
+            if (skill) {
+                try {
+                    span.setAttribute("claude_code.skill.name", skill.name);
+                    if (skill.plugin)
+                        span.setAttribute("claude_code.skill.plugin", skill.plugin);
+                }
+                catch { /* ignore */ }
+            }
+        }
     };
     const handlePostTool = (event) => {
-        const record = sessions.get(event.session_id);
-        if (!record)
-            return;
+        const record = getOrCreateSession(event);
         record.lastEventAt = Date.now();
         if (attachSubagentToEvent(sentry, subagentSession, event, {
             maxAttrLen: config.maxAttributeLength,
@@ -303,6 +422,27 @@ export function startServer(sentry, config, baseAutoTags) {
         // Refresh dynamic tags from every event — tmux sessions can be renamed
         // and parent linkage may only become known after the first hook fires.
         applyClientContext(r.autoTags, event._aiobs?.context);
+        // R3: surface delivery loss the hook-client piggybacked on this event.
+        // Sole site that counts droppedTotal + emits the breadcrumb (once per
+        // event). currentTurnSpan here is the prior/open turn; handleUserPrompt
+        // additionally re-stamps the newly opened turn span (attribute only).
+        const dropped = event._aiobs?.dropped_since_last;
+        if (typeof dropped === "number" && dropped > 0) {
+            droppedTotal += dropped;
+            if (r.currentTurnSpan) {
+                try {
+                    r.currentTurnSpan.setAttribute("claude_code.dropped_since_last", dropped);
+                }
+                catch { /* ignore */ }
+            }
+            captureDroppedBreadcrumb(sentry, {
+                dropped,
+                session: {
+                    sessionId: sid,
+                    sessionName: r.autoTags["claude_code.session_name"],
+                },
+            });
+        }
     };
     async function handleEvent(event) {
         touchSession(event);
@@ -327,7 +467,6 @@ export function startServer(sentry, config, baseAutoTags) {
                 return;
         }
     }
-    const startedAt = Date.now();
     const server = createServer((req, res) => {
         if (req.method === "GET" && req.url === "/health") {
             const body = JSON.stringify({
@@ -386,9 +525,28 @@ export function startServer(sentry, config, baseAutoTags) {
     // lifecycle symmetric and avoids a phantom PID file if listen fails.
     let flushTimer = null;
     let reapTimer = null;
+    const emitHeartbeat = () => {
+        try {
+            const span = sentry.startInactiveSpan({
+                op: "claude_code.collector.heartbeat",
+                name: "collector heartbeat",
+                forceTransaction: true,
+                attributes: {
+                    "claude_code.collector.heartbeat": true,
+                    "claude_code.collector.sessions_active": sessions.size,
+                    "claude_code.collector.uptime_s": Math.floor((Date.now() - startedAt) / 1000),
+                    "claude_code.collector.version": PLUGIN_VERSION,
+                    "claude_code.collector.dropped_total": droppedTotal,
+                },
+            });
+            span.end();
+        }
+        catch { /* ignore */ }
+    };
     server.on("listening", () => {
         writePidFile(port, startedAt);
         flushTimer = setInterval(() => {
+            emitHeartbeat();
             try {
                 void sentry.flush(2000);
             }
@@ -449,5 +607,5 @@ export function startServer(sentry, config, baseAutoTags) {
     };
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
-    return { close: shutdown };
+    return { close: shutdown, emitHeartbeat };
 }

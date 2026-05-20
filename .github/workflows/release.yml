@@ -1,0 +1,88 @@
+name: release
+
+# Auto-tag + GitHub release, version-driven. Fires only AFTER the `ci`
+# workflow finishes successfully on `main`, so we never release a red commit.
+# Idempotent: if the tag for the current .claude-plugin/plugin.json version
+# already exists, it no-ops. To cut a release, merge a version bump to main.
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Only on a successful ci run that was on main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Release exactly the commit ci validated; full history for tags.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="$(jq -r '.version' .claude-plugin/plugin.json)"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::could not read version from .claude-plugin/plugin.json"
+            exit 1
+          fi
+          # Guard: the three manifests must agree (catches a partial bump).
+          PKG="$(jq -r '.version' package.json)"
+          MKT="$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)"
+          if [ "$PKG" != "$VERSION" ] || [ "$MKT" != "$VERSION" ]; then
+            echo "::error::version mismatch — plugin.json=$VERSION package.json=$PKG marketplace.json=$MKT"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if tag already exists
+        id: check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.ver.outputs.tag }} already exists — nothing to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract changelog section
+        if: steps.check.outputs.exists == 'false'
+        id: notes
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Print the body between "## [VERSION]" and the next "## [" heading.
+          # Literal index() match — the heading contains regex metachars ([].).
+          awk -v tag="## [$VERSION]" '
+            index($0, tag) == 1 {found=1; next}
+            found && index($0, "## [") == 1 {exit}
+            found {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release ${{ steps.ver.outputs.tag }}" > RELEASE_NOTES.md
+          fi
+          echo "---- release notes ----"
+          cat RELEASE_NOTES.md
+
+      - name: Create tag + GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md

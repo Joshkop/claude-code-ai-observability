@@ -163,7 +163,7 @@ describe("closeTurnSpan attribute contract", () => {
 
     const chatSpan = sentry.spans[sentry.spans.length - 1];
     expect(chatSpan.attrs["gen_ai.operation.name"]).toBe("chat");
-    expect(chatSpan.attrs["gen_ai.usage.input_tokens"]).toBe(150);
+    expect(chatSpan.attrs["gen_ai.usage.input_tokens"]).toBe(150); // input_tokens is the full input including cached (Sentry schema)
     expect(chatSpan.attrs["gen_ai.usage.output_tokens"]).toBe(60);
     expect(chatSpan.attrs["gen_ai.usage.total_tokens"]).toBe(210);
     expect(chatSpan.attrs["gen_ai.usage.input_tokens.cached"]).toBe(30);
@@ -298,6 +298,32 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat).toBeDefined();
     expect(chat!.attrs["gen_ai.usage.output_tokens.reasoning"]).toBeUndefined();
     expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBeUndefined();
+  });
+});
+
+describe("C2 — input_tokens includes cached (Sentry schema)", () => {
+  it("input_tokens is the full input including cached + cache_write; total_tokens is input + output", () => {
+    const sentry = makeFakeSentry();
+    const turnSpan = makeFakeSpan();
+    const cfg = { recordInputs: false, recordOutputs: false, maxAttributeLength: 1000, tags: {} } as never;
+    closeTurnSpan(
+      sentry as never,
+      turnSpan as never,
+      {
+        tokens: {
+          turnIndex: 0, inputTokens: 100, outputTokens: 40,
+          cachedInputTokens: 20, cacheCreationTokens: 10, totalTokens: 140,
+          model: "claude-opus-4-7", prompt: null, response: null,
+        },
+      },
+      cfg,
+    );
+    const chat = sentry.spans[sentry.spans.length - 1];
+    expect(chat.attrs["gen_ai.usage.input_tokens"]).toBe(100);
+    expect(chat.attrs["gen_ai.usage.input_tokens.cached"]).toBe(20);
+    expect(chat.attrs["gen_ai.usage.input_tokens.cache_write"]).toBe(10);
+    expect(chat.attrs["gen_ai.usage.output_tokens"]).toBe(40);
+    expect(chat.attrs["gen_ai.usage.total_tokens"]).toBe(140);
   });
 });
 

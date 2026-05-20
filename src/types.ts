@@ -95,7 +95,12 @@ export interface AiobsClientContext {
 
 /** Wrapper field added by the hook-client to every outbound hook event. */
 export interface AiobsEnvelope {
-  _aiobs?: { context?: AiobsClientContext };
+  _aiobs?: {
+    context?: AiobsClientContext;
+    /** R3: count of events the hook-client failed to deliver since the last
+     *  successful POST. Piggybacked so loss is observable from Sentry. */
+    dropped_since_last?: number;
+  };
 }
 
 export interface SessionStartEvent extends AiobsEnvelope {
@@ -110,6 +115,10 @@ export interface UserPromptSubmitEvent extends AiobsEnvelope {
   session_id: string;
   prompt?: string;
   message?: string;
+  /** C1: stable id of this prompt, used to correlate the collector's open
+   *  turn to the transcript's real-turn line. Optional — absent on older
+   *  Claude Code; collector falls back to ordinal among real turns. */
+  prompt_id?: string;
 }
 
 export interface PreToolUseEvent extends AiobsEnvelope {
