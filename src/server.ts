@@ -134,7 +134,7 @@ export function startServer(
   sentry: typeof Sentry,
   config: ResolvedPluginConfig,
   baseAutoTags: AutoTags,
-): { close: () => Promise<void>; emitHeartbeat: () => void } {
+): { close: () => Promise<void>; emitHeartbeat: () => void; forceReap: () => void } {
   const sessions = new Map<string, SessionRecord>();
   let droppedTotal = 0;
   const startedAt = Date.now();
@@ -180,11 +180,14 @@ export function startServer(
   };
 
   const reapStaleSession = (sessionId: string, record: SessionRecord): void => {
-    void closeCurrentTurn(record).catch(() => { /* ignore */ });
-    for (const [, pending] of record.pendingTools) {
-      try { pending.span.end(); } catch { /* ignore */ }
-    }
-    record.pendingTools.clear();
+    sentry.withIsolationScope((scope) => {
+      scope.setConversationId(sessionId);
+      try { void closeCurrentTurn(record).catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      for (const [, pending] of record.pendingTools) {
+        try { pending.span.end(); } catch { /* ignore */ }
+      }
+      record.pendingTools.clear();
+    });
     sessions.delete(sessionId);
   };
 
@@ -531,26 +534,29 @@ export function startServer(
 
   async function handleEvent(event: HookEvent): Promise<void> {
     touchSession(event);
-    switch (event.hook_event_name) {
-      case "SessionStart":
-        await handleSessionStart(event);
-        return;
-      case "UserPromptSubmit":
-        handleUserPrompt(event);
-        return;
-      case "PreToolUse":
-        handlePreTool(event);
-        return;
-      case "PostToolUse":
-        handlePostTool(event);
-        return;
-      case "SessionEnd":
-        await handleSessionEnd(event);
-        return;
-      case "Stop":
-      case "PreCompact":
-        return;
-    }
+    await sentry.withIsolationScope(async (scope) => {
+      if (event.session_id) scope.setConversationId(event.session_id);
+      switch (event.hook_event_name) {
+        case "SessionStart":
+          await handleSessionStart(event);
+          return;
+        case "UserPromptSubmit":
+          handleUserPrompt(event);
+          return;
+        case "PreToolUse":
+          handlePreTool(event);
+          return;
+        case "PostToolUse":
+          handlePostTool(event);
+          return;
+        case "SessionEnd":
+          await handleSessionEnd(event);
+          return;
+        case "Stop":
+        case "PreCompact":
+          return;
+      }
+    });
   }
 
   const server = createServer((req, res) => {
@@ -695,5 +701,11 @@ export function startServer(
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
-  return { close: shutdown, emitHeartbeat };
+  const forceReap = (): void => {
+    for (const [sid, record] of sessions) {
+      reapStaleSession(sid, record);
+    }
+  };
+
+  return { close: shutdown, emitHeartbeat, forceReap };
 }

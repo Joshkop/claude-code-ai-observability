@@ -16,8 +16,10 @@ interface FakeSpan {
 
 function makeFakeSentry() {
   const spans: FakeSpan[] = [];
+  const conversationIdCalls: Array<string | null | undefined> = [];
   return {
     spans,
+    conversationIdCalls,
     startInactiveSpan(opts: {
       op?: string;
       name?: string;
@@ -40,6 +42,14 @@ function makeFakeSentry() {
     },
     withActiveSpan<T>(_parent: unknown, fn: () => T): T {
       return fn();
+    },
+    withIsolationScope<T>(fn: (scope: { setConversationId(id: string | null | undefined): void }) => T): T {
+      const scope = {
+        setConversationId: (id: string | null | undefined) => {
+          conversationIdCalls.push(id);
+        },
+      };
+      return fn(scope);
     },
     flush: async () => true,
   };
@@ -596,5 +606,102 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
     expect(chat!.attrs["gen_ai.usage.input_tokens"]).toBe(100);
     expect(chat!.attrs["gen_ai.usage.output_tokens"]).toBe(50);
     expect(callCount).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2: conversation scope propagation via withIsolationScope
+// ---------------------------------------------------------------------------
+describe("server: conversation scope propagation", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
+  afterEach(async () => {
+    await close();
+    delete process.env.SENTRY_COLLECTOR_PORT;
+  });
+
+  it("handleEvent: UserPromptSubmit triggers setConversationId(session_id)", async () => {
+    await postHook(port, {
+      hook_event_name: "UserPromptSubmit",
+      session_id: "sess-abc",
+      prompt: "hello",
+    });
+    expect(sentry.conversationIdCalls).toContain("sess-abc");
+  });
+
+  it("handleEvent: SessionEnd triggers setConversationId(session_id)", async () => {
+    await postHook(port, {
+      hook_event_name: "SessionEnd",
+      session_id: "sess-end",
+    });
+    expect(sentry.conversationIdCalls).toContain("sess-end");
+  });
+
+  it("handleEvent: PostToolUse triggers setConversationId(session_id)", async () => {
+    // Need an open turn for PostToolUse to reference, but the scope call happens regardless
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sess-tool", prompt: "hi" });
+    const before = sentry.conversationIdCalls.length;
+    await postHook(port, {
+      hook_event_name: "PostToolUse",
+      session_id: "sess-tool",
+      tool_name: "Bash",
+      tool_use_id: "tu-1",
+      tool_response: "ok",
+      tool_error: false,
+    });
+    expect(sentry.conversationIdCalls.slice(before)).toContain("sess-tool");
+  });
+
+  it("handleEvent: event with no session_id does NOT call setConversationId", async () => {
+    const before = sentry.conversationIdCalls.length;
+    // PreCompact has no session_id in spec; send it without one
+    await postHook(port, {
+      hook_event_name: "PreCompact",
+    } as unknown as Parameters<typeof postHook>[1]);
+    expect(sentry.conversationIdCalls.length).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: reapStaleSession triggers setConversationId
+// ---------------------------------------------------------------------------
+describe("server: reapStaleSession conversation scope", () => {
+  it("reapStaleSession: forceReap triggers setConversationId(sessionId)", async () => {
+    const port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    const sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    try {
+      for (let i = 0; i < 25; i++) {
+        try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await postHook(port, {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "sess-stale",
+        prompt: "hi",
+      });
+      const beforeReap = sentry.conversationIdCalls.length;
+      // forceReap reaps all active sessions regardless of idle time
+      server.forceReap();
+      expect(sentry.conversationIdCalls.slice(beforeReap)).toContain("sess-stale");
+    } finally {
+      await server.close();
+      delete process.env.SENTRY_COLLECTOR_PORT;
+    }
   });
 });
