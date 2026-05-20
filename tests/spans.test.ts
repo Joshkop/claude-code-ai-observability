@@ -299,6 +299,39 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat!.attrs["gen_ai.usage.output_tokens.reasoning"]).toBeUndefined();
     expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBeUndefined();
   });
+
+  it("emits claude_code.token_extraction.status when CloseTurnInput.tokenExtractionStatus is set", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(
+      sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6",
+    );
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: { turnIndex: 0, inputTokens: 10, outputTokens: 5,
+        cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 15,
+        model: "claude-sonnet-4-6", prompt: null, response: null },
+      sessionId: "sess-1",
+      tokenExtractionStatus: "ok|matched_after_retry",
+    }, baseConfig);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok|matched_after_retry");
+  });
+
+  it("omits claude_code.token_extraction.status when undefined", () => {
+    const sentry = makeFakeSentry();
+    const turn = openTurnTransaction(
+      sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6",
+    );
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: { turnIndex: 0, inputTokens: 10, outputTokens: 5,
+        cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 15,
+        model: "claude-sonnet-4-6", prompt: null, response: null },
+      sessionId: "sess-1",
+    }, baseConfig);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(chat!.attrs["claude_code.token_extraction.status"]).toBeUndefined();
+  });
 });
 
 describe("C2 — input_tokens includes cached (Sentry schema)", () => {
