@@ -305,4 +305,21 @@ describe("createToolSpan parent behavior", () => {
     const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
     expect(fake.attrs["gen_ai.tool.call.id"]).toBeUndefined();
   });
+
+  it("sets gen_ai.conversation.id from sessionId", () => {
+    const sentry = makeFakeSentry();
+    const span = createToolSpan(
+      sentry as never,
+      null,
+      "Bash",
+      { command: "ls" },
+      baseConfig,
+      undefined,
+      "tool-use-id-1",
+      "session-xyz",
+    );
+    const fake = span as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(fake.attrs["gen_ai.conversation.id"]).toBe("session-xyz");
+    span.end();
+  });
 });

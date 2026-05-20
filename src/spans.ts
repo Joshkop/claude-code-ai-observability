@@ -154,6 +154,7 @@ export function createToolSpan(
   config: ResolvedPluginConfig,
   startTime?: number,
   toolUseId?: string,
+  sessionId?: string,
 ): Span {
   const start = (): Span => {
     const span = sentry.startInactiveSpan({
@@ -168,6 +169,7 @@ export function createToolSpan(
         "gen_ai.provider.name": "anthropic",
         "gen_ai.system": "anthropic",
         ...(toolUseId ? { "gen_ai.tool.call.id": toolUseId } : {}),
+        ...(sessionId ? { "gen_ai.conversation.id": sessionId } : {}),
       },
     });
     if (config.recordInputs && input !== undefined) {
