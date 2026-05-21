@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.10] - 2026-05-21
+
+### Fixed
+
+- **Diagnostic attribute no longer redacted by Sentry's server-side scrubber.** `claude_code.token_extraction.status` was being delivered to Sentry as `[Filtered]` because the default data scrubber matches keys containing `token` (intended to catch API tokens / OAuth tokens). The value made the attribute useless for diagnosing zero-token turns. Renamed to `claude_code.usage_extraction.status` (numeric `gen_ai.usage.*tokens*` attributes are unaffected — scrubbing only applies to string-valued attributes). No other behavior change.
+
 ## [0.2.9] - 2026-05-21
 
 ### Fixed

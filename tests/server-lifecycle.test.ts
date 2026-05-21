@@ -548,7 +548,7 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
     await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tm" });
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("transcript_missing");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("transcript_missing");
   });
 
   it("emits status=ok when transcript has tokens for the turn", async () => {
@@ -564,7 +564,7 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
     await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tok", transcript_path: tx });
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("ok");
   });
 
   it("emits status=no_matching_turn when transcript is empty/no real turns", async () => {
@@ -578,7 +578,7 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
     await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-nmt", transcript_path: tx });
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("no_matching_turn");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("no_matching_turn");
   });
 
   it("emits status=turn_had_no_usage when matched turn has zero usage and retry also zero", async () => {
@@ -595,7 +595,7 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
     await postHook(port, { hook_event_name: "SessionEnd", session_id: "s-tnz", transcript_path: tx });
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("turn_had_no_usage");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("turn_had_no_usage");
   });
 
   it("emits status='ok|matched_after_retry' when first read had 0 usage and second has usage", async () => {
@@ -630,7 +630,7 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
 
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok|matched_after_retry");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("ok|matched_after_retry");
     expect(chat!.attrs["gen_ai.usage.input_tokens"]).toBe(100);
     expect(chat!.attrs["gen_ai.usage.output_tokens"]).toBe(50);
     expect(callCount).toBe(2);
