@@ -714,6 +714,146 @@ describe("server: token_extraction.status diagnostic (Tasks 6/7)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Trailing-completion flush race: Stop fires within ~70ms of the assistant
+// writing its trailing text JSONL line in a text → tool_use → text turn.
+// Seen live in Sentry session 539e96b1-…-d40962357876 — the first close
+// snapshot caught only the pre-tool text. The existing responseMissing
+// retry stayed dormant because tokens.response was already non-empty.
+// endsWithToolUse=true on the captured turn is the signal that triggers
+// the wider retry.
+// ---------------------------------------------------------------------------
+describe("server: trailing-completion flush race retry", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+  const tmpDirs: string[] = [];
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    const cfg: ResolvedPluginConfig = { ...baseConfig, recordOutputs: true, recordInputs: true };
+    const server = startServer(sentry as never, cfg, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
+  afterEach(async () => {
+    await close();
+    delete process.env.SENTRY_COLLECTOR_PORT;
+    for (const d of tmpDirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("retries and accepts the second snapshot when first read ended with tool_use", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-trail-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, "placeholder\n", "utf8");
+
+    // First read: trailing text completion has NOT flushed → only the
+    // pre-tool text is captured and endsWithToolUse=true.
+    const racingResult = {
+      turns: [{
+        promptId: null, inputTokens: 100, outputTokens: 50,
+        cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 150,
+        model: "m", prompt: null,
+        response: "Message 1.", responses: ["Message 1."],
+        endsWithToolUse: true,
+        turnIndex: 0,
+      }],
+      byPromptId: new Map<string, never>(),
+      degraded: false,
+      session: {},
+    };
+    // Retry read 200ms later: trailing text has landed → both completions
+    // captured and endsWithToolUse=false.
+    const settledResult = {
+      turns: [{
+        promptId: null, inputTokens: 100, outputTokens: 50,
+        cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 150,
+        model: "m", prompt: null,
+        response: "Message 1.\nMessage 2.", responses: ["Message 1.", "Message 2."],
+        endsWithToolUse: false,
+        turnIndex: 0,
+      }],
+      byPromptId: new Map<string, never>(),
+      degraded: false,
+      session: {},
+    };
+    let callCount = 0;
+    const mod = await import("../src/transcript-reader.js");
+    vi.spyOn(mod, "readTranscript").mockImplementation(() => {
+      callCount += 1;
+      return callCount === 1 ? racingResult : settledResult;
+    });
+
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-trail", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-trail", prompt: "go" });
+    await postHook(port, { hook_event_name: "Stop", session_id: "s-trail", transcript_path: tx });
+
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(callCount).toBe(2);
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("ok|matched_after_retry");
+    // Both completions land as separate entries — the bug was the second
+    // bubble silently going missing from Sentry AI Conversations.
+    expect(chat!.attrs["gen_ai.output.messages"]).toBe(
+      JSON.stringify([
+        { role: "assistant", content: "Message 1." },
+        { role: "assistant", content: "Message 2." },
+      ]),
+    );
+  });
+
+  it("tags turn_had_trailing_completion_pending when retry still ends with tool_use", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-trailfail-"));
+    tmpDirs.push(dir);
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, "placeholder\n", "utf8");
+
+    const stuckResult = {
+      turns: [{
+        promptId: null, inputTokens: 100, outputTokens: 50,
+        cachedInputTokens: 0, cacheCreationTokens: 0, totalTokens: 150,
+        model: "m", prompt: null,
+        response: "Message 1.", responses: ["Message 1."],
+        endsWithToolUse: true,
+        turnIndex: 0,
+      }],
+      byPromptId: new Map<string, never>(),
+      degraded: false,
+      session: {},
+    };
+    let callCount = 0;
+    const mod = await import("../src/transcript-reader.js");
+    vi.spyOn(mod, "readTranscript").mockImplementation(() => {
+      callCount += 1;
+      return stuckResult;
+    });
+
+    await postHook(port, { hook_event_name: "SessionStart", session_id: "s-stuck", transcript_path: tx });
+    await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s-stuck", prompt: "go" });
+    await postHook(port, { hook_event_name: "Stop", session_id: "s-stuck", transcript_path: tx });
+
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    expect(callCount).toBe(2);
+    expect(chat!.attrs["claude_code.usage_extraction.status"])
+      .toBe("turn_had_trailing_completion_pending");
+    // We still emit the partial we have rather than dropping it entirely.
+    expect(chat!.attrs["gen_ai.output.messages"]).toBe(
+      JSON.stringify([{ role: "assistant", content: "Message 1." }]),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Task 2: conversation scope propagation via withIsolationScope
 // ---------------------------------------------------------------------------
 describe("server: conversation scope propagation", () => {

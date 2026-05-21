@@ -247,7 +247,19 @@ export function startServer(
         // Conversations with only the inputs.
         const usageMissing = tokens.inputTokens + tokens.outputTokens === 0;
         const responseMissing = config.recordOutputs && !tokens.response;
-        if (usageMissing || responseMissing) {
+        // Multi-completion turns (text → tool_use → text) write the trailing
+        // text completion as a fresh assistant JSONL line *after* the tool
+        // round-trip. Stop fires within ~70ms of that line being timestamped;
+        // the file-flush race means readTranscript can return only the
+        // pre-tool text. `responseMissing` is too narrow — the first text is
+        // already in `tokens.response` — so the trailing completion silently
+        // never reaches gen_ai.output.messages and Sentry AI Conversations
+        // shows only the first bubble. When the last assistant content block
+        // we observed is a tool_use, the assistant has more to emit; wait
+        // once and re-read.
+        const trailingTextPending =
+          config.recordOutputs && tokens.endsWithToolUse === true;
+        if (usageMissing || responseMissing || trailingTextPending) {
           await new Promise((r) => setTimeout(r, 200));
           const retry = readTranscript(record.transcriptPath);
           parseDegraded = retry.degraded;
@@ -256,13 +268,33 @@ export function startServer(
           const retryTurn = retrySelected.turn;
           const retryUsageOk = retryTurn && (retryTurn.inputTokens + retryTurn.outputTokens) > 0;
           const retryResponseOk = retryTurn && (!config.recordOutputs || retryTurn.response);
-          if (retryTurn && (usageMissing ? retryUsageOk : true) && (responseMissing ? retryResponseOk : true)) {
+          const retryTrailingResolved = retryTurn && retryTurn.endsWithToolUse !== true;
+          if (
+            retryTurn
+            && (usageMissing ? retryUsageOk : true)
+            && (responseMissing ? retryResponseOk : true)
+            && (trailingTextPending ? retryTrailingResolved : true)
+          ) {
             tokens = retryTurn;
             tokenExtractionStatus = "ok|matched_after_retry";
           } else if (usageMissing) {
             tokenExtractionStatus = "turn_had_no_usage";
-          } else {
+          } else if (responseMissing) {
             tokenExtractionStatus = "turn_had_no_response";
+          } else {
+            // Trailing completion still hadn't flushed after the retry —
+            // emit a partial but tag it so this is greppable in Sentry, and
+            // prefer the retry's responses[] if it grew (the trailing text
+            // may have landed even if the model's last visible block is
+            // still tool_use, e.g., further tool calls beyond what we
+            // accounted for).
+            tokenExtractionStatus = "turn_had_trailing_completion_pending";
+            if (
+              retryTurn
+              && (retryTurn.responses?.length ?? 0) > (tokens.responses?.length ?? 0)
+            ) {
+              tokens = retryTurn;
+            }
           }
         } else {
           tokenExtractionStatus = "ok";

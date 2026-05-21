@@ -115,6 +115,30 @@ describe("readTranscript — multi-completion turn (text → tool → text)", ()
     expect(r.turns[0].responses).toEqual(["Message 1.", "Message 2."]);
     // response (joined string) preserved for backward compat / missingness checks.
     expect(r.turns[0].response).toBe("Message 1.\nMessage 2.");
+    // The trailing assistant message is text-only → no follow-up expected.
+    expect(r.turns[0].endsWithToolUse).toBe(false);
+  });
+
+  // Reproduces the file-flush race that hit Sentry session
+  // 539e96b1-…-d40962357876: Stop fired ~70ms after the assistant wrote its
+  // trailing text JSONL line, so closeCurrentTurn read a snapshot where the
+  // turn's last visible assistant message was still the tool_use. The
+  // endsWithToolUse flag is what tells the retry path to wait once instead
+  // of emitting a partial gen_ai.output.messages.
+  it("flags endsWithToolUse=true when the trailing text completion hasn't flushed yet", () => {
+    const p = make(
+      [
+        JSON.stringify({ type: "user", promptId: "p1", message: { content: "do the thing" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: "text", text: "Message 1." }, { type: "tool_use", id: "t1", name: "Bash", input: {} }] } }),
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+        // Trailing assistant text line NOT yet on disk — simulates the
+        // Stop-vs-JSONL-flush race.
+      ].join("\n"),
+    );
+    const r = readTranscript(p);
+    expect(r.turns).toHaveLength(1);
+    expect(r.turns[0].responses).toEqual(["Message 1."]);
+    expect(r.turns[0].endsWithToolUse).toBe(true);
   });
 });
 

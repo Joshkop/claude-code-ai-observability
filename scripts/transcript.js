@@ -103,6 +103,19 @@ export function extractPerTurnTokens(path) {
                 current.response = current.response ? `${current.response}\n${text}` : text;
                 (current.responses ??= []).push(text);
             }
+            // See note in transcript-reader.ts — track terminal block kind of
+            // the last assistant message to detect a trailing completion that
+            // hasn't flushed yet at close time.
+            if (Array.isArray(parsed.message?.content) && parsed.message.content.length > 0) {
+                const last = parsed.message.content[parsed.message.content.length - 1];
+                if (last && typeof last === "object") {
+                    const lt = last.type;
+                    if (lt === "text")
+                        current.endsWithToolUse = false;
+                    else if (lt === "tool_use")
+                        current.endsWithToolUse = true;
+                }
+            }
         }
     }
     if (current)

@@ -30,6 +30,25 @@ function textFromContent(content) {
     }
     return parts.length ? parts.join("\n") : null;
 }
+// Kind of the LAST content block in an assistant message — used as a
+// "is the trailing completion still pending?" signal. Anthropic's stream
+// ends every completion with either a text or a tool_use; if it's tool_use
+// the model will produce another completion once the tool_result arrives.
+// Stop hook can fire before that next JSONL line is flushed to disk —
+// that's the race [[trailing-completion-flush-race]] guards against.
+function lastBlockKindOf(content) {
+    if (!Array.isArray(content) || content.length === 0)
+        return null;
+    const last = content[content.length - 1];
+    if (last && typeof last === "object") {
+        const t = last.type;
+        if (t === "text")
+            return "text";
+        if (t === "tool_use")
+            return "tool_use";
+    }
+    return null;
+}
 function isToolResultUserLine(content) {
     if (!Array.isArray(content))
         return false;
@@ -187,6 +206,13 @@ export function readTranscript(path) {
                 current.response = current.response ? `${current.response}\n${t}` : t;
                 (current.responses ??= []).push(t);
             }
+            // Track the LAST assistant message's terminal block. Latest write
+            // wins — for text → tool_use → text turns, after the trailing text
+            // completion lands this flips back to false, so seeing `true` at
+            // close time is a reliable "more completions pending flush" signal.
+            const kind = lastBlockKindOf(l.message?.content);
+            if (kind !== null)
+                current.endsWithToolUse = kind === "tool_use";
         }
     }
     if (current)
