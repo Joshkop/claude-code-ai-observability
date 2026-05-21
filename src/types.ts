@@ -23,6 +23,14 @@ export interface TurnTokens {
    *  that emit `gen_ai.output.messages` should prefer this array (one entry
    *  per item) and fall back to `response` only when absent. */
   responses?: string[];
+  /** True when the LAST assistant content block we saw for this turn is a
+   *  tool_use. After a tool_use the assistant always emits another
+   *  completion (text or further tool_use) once the tool_result arrives,
+   *  so seeing this set at close time means the trailing completion hasn't
+   *  flushed yet — readers should retry. Stays false/undefined for plain
+   *  text-only turns and for tool-using turns whose trailing text has
+   *  already landed. */
+  endsWithToolUse?: boolean;
   /** Estimated reasoning (thinking) tokens summed from transcript thinking
    *  blocks. Anthropic's usage record does not break thinking out of
    *  output_tokens, so this is a heuristic (ceil(chars/4)) per thinking

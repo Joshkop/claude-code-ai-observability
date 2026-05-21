@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.14] - 2026-05-21
+
+### Fixed
+
+- **AI Conversations: trailing text completion no longer races the Stop hook.** 0.2.13 split multi-completion turns into separate `gen_ai.output.messages` entries, but live traffic still lost the second bubble — Sentry session `539e96b1-…-d40962357876` was the smoking gun. Root cause: Stop fires within ~70ms of the assistant writing its trailing text JSONL line, and `closeCurrentTurn` could read the file before that line was flushed. The existing late-flush retry stayed dormant because `responseMissing` was false — the pre-tool text was already captured in `tokens.response`. Detection now uses a new `endsWithToolUse` signal on `TurnTokens`: when the LAST observed assistant content block for the turn is a `tool_use`, the assistant has more to emit, so we wait once (200ms) and re-read. New `usage_extraction.status` value `turn_had_trailing_completion_pending` surfaces the rare case where even the retry didn't catch the trailing completion (partial output still emitted so nothing is silently lost).
+
 ## [0.2.13] - 2026-05-21
 
 ### Fixed
