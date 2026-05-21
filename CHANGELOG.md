@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.11] - 2026-05-21
+
+### Fixed
+
+- **Sentry AI Conversations now shows every assistant output, not just the first.** Two bugs combined to drop most assistant messages from the Conversations view:
+  - `closeTurnSpan` previously ran only on the *next* `UserPromptSubmit` (or `SessionEnd`), racing the transcript JSONL flush. If assistant text wasn't on disk at close time, `tokens.response` was `null` and the `gen_ai.output.messages` attribute was silently skipped — and the existing 200 ms retry only triggered when usage was zero, not when text was missing. The `Stop` hook now closes the current turn (it fires right after assistant text lands, so the transcript is freshest). `closeCurrentTurn` is idempotent, so the follow-up close from UserPromptSubmit / SessionEnd is a no-op. The late-flush retry now also triggers when `recordOutputs` is on and `response` is null.
+  - When the collector spawned (or self-healed) mid-session, its local `turnIndex` no longer aligned with the transcript's real-turn ordinal. `selectTurn`'s ordinal fallback would silently attribute an earlier turn's response to the current turn (the "how are you" turn would surface turn 0's "Hi! How can I help today?" output). Synthesized sessions now refuse ordinal matches and record `claude_code.usage_extraction.status = no_matching_turn_synthesized_ordinal` so the gap is observable in Sentry.
+
 ## [0.2.10] - 2026-05-21
 
 ### Fixed
