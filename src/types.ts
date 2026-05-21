@@ -16,6 +16,13 @@ export interface TurnTokens {
   model: string | null;
   prompt: string | null;
   response: string | null;
+  /** Each distinct assistant API completion in the turn, in transcript order.
+   *  A tool-using turn produces multiple completions (text → tool_use → text);
+   *  collapsing them into one joined `response` string makes Sentry AI
+   *  Conversations render only the first as a single message bubble. Callers
+   *  that emit `gen_ai.output.messages` should prefer this array (one entry
+   *  per item) and fall back to `response` only when absent. */
+  responses?: string[];
   /** Estimated reasoning (thinking) tokens summed from transcript thinking
    *  blocks. Anthropic's usage record does not break thinking out of
    *  output_tokens, so this is a heuristic (ceil(chars/4)) per thinking

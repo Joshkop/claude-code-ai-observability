@@ -94,6 +94,30 @@ describe("readTranscript — synthetic slash-command lines do not count as real 
   });
 });
 
+describe("readTranscript — multi-completion turn (text → tool → text)", () => {
+  // When the assistant emits text, calls a tool, then emits more text, the
+  // transcript holds two distinct assistant JSONL lines under one user
+  // prompt. Sentry AI Conversations renders each entry in
+  // gen_ai.output.messages as a separate bubble, so we must keep them split
+  // — collapsing into a single newline-joined entry hides every text after
+  // the first.
+  it("collects each assistant completion into responses[] (one per JSONL line)", () => {
+    const p = make(
+      [
+        JSON.stringify({ type: "user", promptId: "p1", message: { content: "do the thing" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: "text", text: "Message 1." }, { type: "tool_use", id: "t1", name: "Bash", input: {} }] } }),
+        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 1, output_tokens: 2 }, content: [{ type: "text", text: "Message 2." }] } }),
+      ].join("\n"),
+    );
+    const r = readTranscript(p);
+    expect(r.turns).toHaveLength(1);
+    expect(r.turns[0].responses).toEqual(["Message 1.", "Message 2."]);
+    // response (joined string) preserved for backward compat / missingness checks.
+    expect(r.turns[0].response).toBe("Message 1.\nMessage 2.");
+  });
+});
+
 describe("readTranscript — missing/empty file is not parse-degraded", () => {
   it("missing file → empty turns, degraded false (not format drift)", () => {
     const r = readTranscript("/tmp/__aiobs_no_such_transcript__.jsonl");

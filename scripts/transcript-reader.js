@@ -183,8 +183,10 @@ export function readTranscript(path) {
             if (l.message?.model)
                 current.model = l.message.model;
             const t = textFromContent(l.message?.content);
-            if (t)
+            if (t) {
                 current.response = current.response ? `${current.response}\n${t}` : t;
+                (current.responses ??= []).push(t);
+            }
         }
     }
     if (current)
