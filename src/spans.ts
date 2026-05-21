@@ -183,7 +183,7 @@ export function closeTurnSpan(
   }
   if (tokenExtractionStatus) {
     chatSpan.setAttribute(
-      "claude_code.token_extraction.status",
+      "claude_code.usage_extraction.status",
       tokenExtractionStatus,
     );
   }

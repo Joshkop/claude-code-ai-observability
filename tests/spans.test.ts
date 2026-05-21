@@ -312,7 +312,7 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat!.attrs["claude_code.reasoning_tokens.estimated"]).toBeUndefined();
   });
 
-  it("emits claude_code.token_extraction.status when CloseTurnInput.tokenExtractionStatus is set", () => {
+  it("emits claude_code.usage_extraction.status when CloseTurnInput.tokenExtractionStatus is set", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(
       sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6",
@@ -326,7 +326,7 @@ describe("closeTurnSpan attribute contract", () => {
     }, baseConfig);
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok|matched_after_retry");
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe("ok|matched_after_retry");
   });
 
   it("mirrors gen_ai.input.messages onto the chat child when prompt + recordInputs (Sentry Conversations base filter requires input AND output on the same span)", () => {
@@ -358,7 +358,7 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat!.attrs["gen_ai.input.messages"]).toBeUndefined();
   });
 
-  it("omits claude_code.token_extraction.status when undefined", () => {
+  it("omits claude_code.usage_extraction.status when undefined", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(
       sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6",
@@ -371,7 +371,7 @@ describe("closeTurnSpan attribute contract", () => {
     }, baseConfig);
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["claude_code.token_extraction.status"]).toBeUndefined();
+    expect(chat!.attrs["claude_code.usage_extraction.status"]).toBeUndefined();
   });
 });
 

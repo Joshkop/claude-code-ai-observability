@@ -91,7 +91,7 @@ export function closeTurnSpan(sentry, turnSpans, input, config, endTime) {
         chatSpan.setAttribute("gen_ai.output.messages", serialize([{ role: "assistant", content: response }], config.maxAttributeLength));
     }
     if (tokenExtractionStatus) {
-        chatSpan.setAttribute("claude_code.token_extraction.status", tokenExtractionStatus);
+        chatSpan.setAttribute("claude_code.usage_extraction.status", tokenExtractionStatus);
     }
     chatSpan.end(endTime);
     if (respModel) {
