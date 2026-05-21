@@ -153,6 +153,7 @@ export interface PreCompactEvent extends AiobsEnvelope {
 export interface StopEvent extends AiobsEnvelope {
   hook_event_name: "Stop";
   session_id: string;
+  transcript_path?: string;
 }
 
 export type HookEvent =

@@ -10,6 +10,7 @@ import type {
   ResolvedPluginConfig,
   SessionEndEvent,
   SessionStartEvent,
+  StopEvent,
   UserPromptSubmitEvent,
 } from "./types.js";
 import { reportPluginError } from "./sentry-errors.js";
@@ -225,23 +226,43 @@ export function startServer(
       // UserPromptSubmit corresponds to exactly one real (non-sidechain,
       // non-tool_result) user line.
       const selected = selectTurn(result, record.currentPromptId, record.turnIndex);
-      if (!selected.turn) {
-        tokenExtractionStatus = "no_matching_turn";
+      // Synthesized sessions start record.turnIndex at -1 even when the
+      // transcript already holds prior real turns (collector spawned mid-
+      // session or self-healed after a restart). The local ordinal no longer
+      // aligns with the transcript's real-turn index, so an ordinal fallback
+      // can silently attach an earlier turn's response to a later turn.
+      // Better to drop one turn's data than to attribute the wrong assistant
+      // text to it — refuse ordinal matches under synthesis.
+      const unsafeOrdinal = record.synthesized && selected.matchedBy === "ordinal";
+      if (!selected.turn || unsafeOrdinal) {
+        tokenExtractionStatus = unsafeOrdinal
+          ? "no_matching_turn_synthesized_ordinal"
+          : "no_matching_turn";
       } else {
         tokens = selected.turn;
-        if (tokens.inputTokens + tokens.outputTokens === 0) {
-          // Late-flush hypothesis: assistant usage may not yet be on disk.
-          // Sleep briefly and try once more.
+        // Late-flush hypothesis: assistant usage OR assistant text may not yet
+        // be on disk when the prior turn closes. Retry once if either is
+        // missing — without the response retry, turns whose usage flushed
+        // before text silently drop gen_ai.output.messages, leaving Sentry AI
+        // Conversations with only the inputs.
+        const usageMissing = tokens.inputTokens + tokens.outputTokens === 0;
+        const responseMissing = config.recordOutputs && !tokens.response;
+        if (usageMissing || responseMissing) {
           await new Promise((r) => setTimeout(r, 200));
           const retry = readTranscript(record.transcriptPath);
           parseDegraded = retry.degraded;
           sessionDims = retry.session;
           const retrySelected = selectTurn(retry, record.currentPromptId, record.turnIndex);
-          if (retrySelected.turn && (retrySelected.turn.inputTokens + retrySelected.turn.outputTokens) > 0) {
-            tokens = retrySelected.turn;
+          const retryTurn = retrySelected.turn;
+          const retryUsageOk = retryTurn && (retryTurn.inputTokens + retryTurn.outputTokens) > 0;
+          const retryResponseOk = retryTurn && (!config.recordOutputs || retryTurn.response);
+          if (retryTurn && (usageMissing ? retryUsageOk : true) && (responseMissing ? retryResponseOk : true)) {
+            tokens = retryTurn;
             tokenExtractionStatus = "ok|matched_after_retry";
-          } else {
+          } else if (usageMissing) {
             tokenExtractionStatus = "turn_had_no_usage";
+          } else {
+            tokenExtractionStatus = "turn_had_no_response";
           }
         } else {
           tokenExtractionStatus = "ok";
@@ -499,6 +520,21 @@ export function startServer(
     record.pendingTools.delete(key);
   };
 
+  // Stop fires right after the assistant text lands in the transcript — the
+  // freshest moment to harvest the response. Without this, closeCurrentTurn
+  // only runs on the next UserPromptSubmit (or SessionEnd) and races the
+  // transcript flush, silently dropping gen_ai.output.messages for any turn
+  // where text wasn't on disk yet. closeCurrentTurn is idempotent (clears
+  // currentTurnSpans), so a follow-up close from UserPromptSubmit is a no-op.
+  const handleStop = async (event: StopEvent): Promise<void> => {
+    const record = sessions.get(event.session_id);
+    if (!record) return;
+    if (event.transcript_path && !record.transcriptPath) {
+      record.transcriptPath = event.transcript_path;
+    }
+    await closeCurrentTurn(record);
+  };
+
   const handleSessionEnd = async (event: SessionEndEvent): Promise<void> => {
     const record = sessions.get(event.session_id);
     if (!record) return;
@@ -566,6 +602,8 @@ export function startServer(
           await handleSessionEnd(event);
           return;
         case "Stop":
+          await handleStop(event);
+          return;
         case "PreCompact":
           return;
       }

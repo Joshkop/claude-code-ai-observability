@@ -269,6 +269,52 @@ describe("server: reader integration (C1/C6)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+});
+
+describe("server: Stop hook closes the turn with response", () => {
+  let port: number;
+  let sentry: ReturnType<typeof makeFakeSentry>;
+  let close: () => Promise<void>;
+
+  beforeEach(async () => {
+    port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    sentry = makeFakeSentry();
+    // Stop's whole job is to make output capture reliable, so recordOutputs
+    // must be on for the assertion to mean anything.
+    const cfg: ResolvedPluginConfig = { ...baseConfig, recordOutputs: true, recordInputs: true };
+    const server = startServer(sentry as never, cfg, baseTags);
+    close = server.close;
+    for (let i = 0; i < 25; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterEach(async () => { await close(); delete process.env.SENTRY_COLLECTOR_PORT; });
+
+  it("Stop captures gen_ai.output.messages and SessionEnd is idempotent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-stop-"));
+    const tx = join(dir, "s.jsonl");
+    writeFileSync(tx, [
+      JSON.stringify({ type: "user", promptId: "P1", message: { content: "hello" } }),
+      JSON.stringify({ type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 5, output_tokens: 7 }, content: [{ type: "text", text: "hi there" }] } }),
+    ].join("\n"), "utf8");
+    try {
+      await postHook(port, { hook_event_name: "SessionStart", session_id: "stop1", transcript_path: tx });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "stop1", prompt: "hello", prompt_id: "P1" });
+      await postHook(port, { hook_event_name: "Stop", session_id: "stop1", transcript_path: tx });
+      const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
+      expect(chat).toBeTruthy();
+      expect(chat!.attrs["gen_ai.output.messages"]).toBe(
+        JSON.stringify([{ role: "assistant", content: "hi there" }]),
+      );
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "stop1", transcript_path: tx });
+      expect(sentry.spans.filter((s) => s.op === "gen_ai.chat")).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("server: per-session git cwd (C4)", () => {
@@ -351,6 +397,36 @@ describe("server: lazy session synthesis (R2)", () => {
       const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
       expect(turn).toBeTruthy();
       expect(turn!.attrs["claude_code.session.synthesized"]).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses ordinal fallback when the session is synthesized to avoid wrong-turn attribution", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "srv-r2-ord-"));
+    const tx = join(dir, "s.jsonl");
+    try {
+      // Transcript already holds two prior real turns from before the
+      // collector spawned. Synthesized session's local turnIndex starts at
+      // 0 on its first UserPromptSubmit, which would ordinal-match the
+      // FIRST transcript turn's response — exactly the bug this guards.
+      writeFileSync(tx, [
+        JSON.stringify({ type: "user", promptId: "OLD1", message: { content: "old1" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 5, output_tokens: 5 }, content: [{ type: "text", text: "OLD RESPONSE 1" }] } }),
+        JSON.stringify({ type: "user", promptId: "OLD2", message: { content: "old2" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 5, output_tokens: 5 }, content: [{ type: "text", text: "OLD RESPONSE 2" }] } }),
+      ].join("\n"), "utf8");
+      // Skip SessionStart; UserPromptSubmit with a prompt_id that does NOT
+      // exist in the transcript forces ordinal fallback.
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "syn-ord", prompt: "new", prompt_id: "NEW_NOT_IN_TRANSCRIPT", _aiobs: { context: { cwd: dir } } });
+      await postHook(port, { hook_event_name: "SessionEnd", session_id: "syn-ord", transcript_path: tx });
+      const chat = sentry.spans.find((s) => s.op === "gen_ai.chat");
+      expect(chat).toBeTruthy();
+      // We must NOT have inherited OLD1's response.
+      expect(chat!.attrs["gen_ai.output.messages"]).toBeUndefined();
+      expect(chat!.attrs["claude_code.usage_extraction.status"]).toBe(
+        "no_matching_turn_synthesized_ordinal",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
