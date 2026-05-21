@@ -81,6 +81,12 @@ export interface CloseTurnInput {
   responseModel?: string;
   cost?: { inputCost: number; outputCost: number; totalCost: number };
   response?: string | null;
+  /** One entry per assistant API completion in the turn (text → tool → text
+   *  produces multiple). When present, emitted as separate entries in
+   *  gen_ai.output.messages so Sentry AI Conversations renders each as its
+   *  own bubble. Falls back to `response` (single joined string) when absent
+   *  — older transcripts or legacy callers. */
+  responses?: string[];
   /** Unix-seconds start time of the turn, used as the chat child's startTime. */
   turnStartTime?: number;
   /** Session id, replicated onto the chat child for filter parity. */
@@ -111,7 +117,7 @@ export function closeTurnSpan(
   endTime?: number,
 ): void {
   const { root: rootSpan, agent: turnSpan } = turnSpans;
-  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus, prompt } = input;
+  const { tokens, responseModel, cost, response, responses, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus, prompt } = input;
   const respModel = responseModel ?? tokens.model ?? undefined;
 
   // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
@@ -172,14 +178,23 @@ export function closeTurnSpan(
       ),
     );
   }
-  if (config.recordOutputs && response) {
-    chatSpan.setAttribute(
-      "gen_ai.output.messages",
-      serialize(
-        [{ role: "assistant", content: response }],
-        config.maxAttributeLength,
-      ),
-    );
+  if (config.recordOutputs) {
+    // Prefer one entry per assistant API completion — a tool-using turn
+    // (text → tool_use → text) lands as multiple completions in the
+    // transcript, and Sentry AI Conversations renders each entry as its own
+    // bubble. Collapsing them into one joined-string entry hides every text
+    // after the first newline.
+    const messages = responses && responses.length > 0
+      ? responses.map((content) => ({ role: "assistant", content }))
+      : response
+        ? [{ role: "assistant", content: response }]
+        : null;
+    if (messages) {
+      chatSpan.setAttribute(
+        "gen_ai.output.messages",
+        serialize(messages, config.maxAttributeLength),
+      );
+    }
   }
   if (tokenExtractionStatus) {
     chatSpan.setAttribute(

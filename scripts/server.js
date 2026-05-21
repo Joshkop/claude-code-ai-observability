@@ -250,6 +250,7 @@ export function startServer(sentry, config, baseAutoTags) {
             tokens,
             responseModel: record.responseModel ?? record.model,
             response: tokens.response,
+            responses: tokens.responses,
             cost,
             turnStartTime: record.currentTurnStart ?? undefined,
             sessionId: record.autoTags["claude_code.session_id"],

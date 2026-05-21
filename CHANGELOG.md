@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.13] - 2026-05-21
+
+### Fixed
+
+- **AI Conversations: tool-using turns now show every assistant message, not just the first.** When the assistant emitted `text → tool_use → text` within a single turn, the transcript landed two distinct assistant JSONL lines (two Anthropic API completions). The collector concatenated them into one joined-string entry — `[{role: "assistant", content: "Message 1.\nMessage 2."}]` — and Sentry AI Conversations rendered only the first text. `RealTurn` now carries `responses: string[]` (one per assistant completion); `gen_ai.output.messages` emits one `{role: "assistant", content: …}` entry per array item. The legacy joined `response` string is preserved for backward-compat / missingness checks and used as a single-entry fallback when `responses[]` is absent.
+
 ## [0.2.12] - 2026-05-21
 
 ### Fixed

@@ -101,6 +101,7 @@ export function extractPerTurnTokens(path) {
             const text = extractTextFromContent(parsed.message?.content);
             if (text) {
                 current.response = current.response ? `${current.response}\n${text}` : text;
+                (current.responses ??= []).push(text);
             }
         }
     }

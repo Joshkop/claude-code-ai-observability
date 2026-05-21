@@ -346,6 +346,39 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat!.attrs["gen_ai.conversation.id"]).toBe("sess-conv");
   });
 
+  it("emits one gen_ai.output.messages entry per assistant completion when responses[] is set (Sentry AI Conversations renders each as its own bubble)", () => {
+    const sentry = makeFakeSentry();
+    const cfg: ResolvedPluginConfig = { ...baseConfig, recordOutputs: true };
+    const turn = openTurnTransaction(sentry as never, "sess-multi", 0, null, baseTags, cfg);
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: makeTokens(),
+      sessionId: "sess-multi",
+      response: "Message 1.\nMessage 2.",
+      responses: ["Message 1.", "Message 2."],
+    }, cfg);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    expect(chat).toBeDefined();
+    const out = JSON.parse(chat!.attrs["gen_ai.output.messages"] as string);
+    expect(out).toEqual([
+      { role: "assistant", content: "Message 1." },
+      { role: "assistant", content: "Message 2." },
+    ]);
+  });
+
+  it("falls back to joined response string when responses[] is absent (legacy callers / single-completion turns)", () => {
+    const sentry = makeFakeSentry();
+    const cfg: ResolvedPluginConfig = { ...baseConfig, recordOutputs: true };
+    const turn = openTurnTransaction(sentry as never, "sess-legacy", 0, null, baseTags, cfg);
+    closeTurnSpan(sentry as never, turn as never, {
+      tokens: makeTokens(),
+      sessionId: "sess-legacy",
+      response: "single message",
+    }, cfg);
+    const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
+    const out = JSON.parse(chat!.attrs["gen_ai.output.messages"] as string);
+    expect(out).toEqual([{ role: "assistant", content: "single message" }]);
+  });
+
   it("omits gen_ai.input.messages on the chat child when recordInputs is false", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);

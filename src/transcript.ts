@@ -115,6 +115,7 @@ export function extractPerTurnTokens(path: string): TurnTokens[] {
       const text = extractTextFromContent(parsed.message?.content);
       if (text) {
         current.response = current.response ? `${current.response}\n${text}` : text;
+        (current.responses ??= []).push(text);
       }
     }
   }
