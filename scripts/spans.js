@@ -38,7 +38,7 @@ export function openTurnTransaction(sentry, sessionId, turnIndex, prompt, tags, 
     }));
     if (config.recordInputs && prompt) {
         const messages = serialize([{ role: "user", content: prompt }], config.maxAttributeLength);
-        agent.setAttribute("gen_ai.request.messages", messages);
+        agent.setAttribute("gen_ai.input.messages", messages);
     }
     return { root, agent };
 }
@@ -85,10 +85,10 @@ export function closeTurnSpan(sentry, turnSpans, input, config, endTime) {
         }
     }
     if (config.recordInputs && prompt) {
-        chatSpan.setAttribute("gen_ai.request.messages", serialize([{ role: "user", content: prompt }], config.maxAttributeLength));
+        chatSpan.setAttribute("gen_ai.input.messages", serialize([{ role: "user", content: prompt }], config.maxAttributeLength));
     }
     if (config.recordOutputs && response) {
-        chatSpan.setAttribute("gen_ai.response.text", serialize(response, config.maxAttributeLength));
+        chatSpan.setAttribute("gen_ai.output.messages", serialize([{ role: "assistant", content: response }], config.maxAttributeLength));
     }
     if (tokenExtractionStatus) {
         chatSpan.setAttribute("claude_code.token_extraction.status", tokenExtractionStatus);
