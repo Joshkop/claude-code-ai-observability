@@ -71,7 +71,7 @@ export function openTurnTransaction(
       [{ role: "user", content: prompt }],
       config.maxAttributeLength,
     );
-    agent.setAttribute("gen_ai.request.messages", messages);
+    agent.setAttribute("gen_ai.input.messages", messages);
   }
   return { root, agent };
 }
@@ -165,7 +165,7 @@ export function closeTurnSpan(
   }
   if (config.recordInputs && prompt) {
     chatSpan.setAttribute(
-      "gen_ai.request.messages",
+      "gen_ai.input.messages",
       serialize(
         [{ role: "user", content: prompt }],
         config.maxAttributeLength,
@@ -174,8 +174,11 @@ export function closeTurnSpan(
   }
   if (config.recordOutputs && response) {
     chatSpan.setAttribute(
-      "gen_ai.response.text",
-      serialize(response, config.maxAttributeLength),
+      "gen_ai.output.messages",
+      serialize(
+        [{ role: "assistant", content: response }],
+        config.maxAttributeLength,
+      ),
     );
   }
   if (tokenExtractionStatus) {

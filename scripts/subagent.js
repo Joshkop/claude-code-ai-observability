@@ -47,7 +47,7 @@ export function createSubagentSpan(sentry, event, options = {}) {
     if (description)
         attributes["gen_ai.agent.description"] = scrubString(truncate(description, maxAttrLen));
     if (prompt)
-        attributes["gen_ai.request.messages"] = scrubString(truncate(prompt, maxAttrLen));
+        attributes["gen_ai.input.messages"] = scrubString(truncate(prompt, maxAttrLen));
     if (event.tool_use_id)
         attributes["gen_ai.tool.call.id"] = event.tool_use_id;
     // Dual-namespaced on purpose: gen_ai.agent.* for generic OTel AI tooling,

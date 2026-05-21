@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.9] - 2026-05-21
+
+### Fixed
+
+- **Sentry AI Conversations view actually populates now (fourth-and-final).** 0.2.8 mirrored the prompt onto the chat child as `gen_ai.request.messages` plus `gen_ai.response.text`, but the view stayed empty because `@sentry/node` 10.53.1 follows the current OTel gen_ai semantic convention which renamed those attributes. The SDK silently dropped the legacy keys and initialized `gen_ai.input.messages` to an empty array — visible directly in the span detail panel as `gen_ai.input.messages: []`. Switched all input/output message attributes to the new names:
+  - `gen_ai.request.messages` → `gen_ai.input.messages` (on both the `gen_ai.invoke_agent` agent span and the `gen_ai.chat` child)
+  - `gen_ai.response.text` → `gen_ai.output.messages` on the chat child, now wrapped as `[{role: "assistant", content: response}]` to match the array shape Sentry expects
+  - Same rename applied to the synthesized subagent invoke_agent span (`src/subagent.ts`)
+
 ## [0.2.8] - 2026-05-21
 
 ### Fixed

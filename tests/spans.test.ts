@@ -130,19 +130,19 @@ describe("openTurnTransaction attribute contract", () => {
     expect(root.attrs["process.pid"]).toBe(1234);
   });
 
-  it("attaches gen_ai.request.messages to the agent span when recordInputs is true and prompt provided", () => {
+  it("attaches gen_ai.input.messages to the agent span when recordInputs is true and prompt provided", () => {
     const sentry = makeFakeSentry();
     const cfg: ResolvedPluginConfig = { ...baseConfig, recordInputs: true };
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, "hello world", baseTags, cfg);
     const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(agent.attrs["gen_ai.request.messages"]).toBeDefined();
+    expect(agent.attrs["gen_ai.input.messages"]).toBeDefined();
   });
 
-  it("does not attach gen_ai.request.messages when recordInputs is false", () => {
+  it("does not attach gen_ai.input.messages when recordInputs is false", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, "hello world", baseTags, baseConfig);
     const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(agent.attrs["gen_ai.request.messages"]).toBeUndefined();
+    expect(agent.attrs["gen_ai.input.messages"]).toBeUndefined();
   });
 });
 
@@ -329,7 +329,7 @@ describe("closeTurnSpan attribute contract", () => {
     expect(chat!.attrs["claude_code.token_extraction.status"]).toBe("ok|matched_after_retry");
   });
 
-  it("mirrors gen_ai.request.messages onto the chat child when prompt + recordInputs (Sentry Conversations base filter requires input AND output on the same span)", () => {
+  it("mirrors gen_ai.input.messages onto the chat child when prompt + recordInputs (Sentry Conversations base filter requires input AND output on the same span)", () => {
     const sentry = makeFakeSentry();
     const cfg: ResolvedPluginConfig = { ...baseConfig, recordInputs: true, recordOutputs: true };
     const turn = openTurnTransaction(sentry as never, "sess-conv", 0, "hello world", baseTags, cfg);
@@ -341,12 +341,12 @@ describe("closeTurnSpan attribute contract", () => {
     }, cfg);
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
     expect(chat).toBeDefined();
-    expect(chat!.attrs["gen_ai.request.messages"]).toBeDefined();
-    expect(chat!.attrs["gen_ai.response.text"]).toBeDefined();
+    expect(chat!.attrs["gen_ai.input.messages"]).toBeDefined();
+    expect(chat!.attrs["gen_ai.output.messages"]).toBeDefined();
     expect(chat!.attrs["gen_ai.conversation.id"]).toBe("sess-conv");
   });
 
-  it("omits gen_ai.request.messages on the chat child when recordInputs is false", () => {
+  it("omits gen_ai.input.messages on the chat child when recordInputs is false", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     closeTurnSpan(sentry as never, turn as never, {
@@ -355,7 +355,7 @@ describe("closeTurnSpan attribute contract", () => {
       prompt: "hello world",
     }, baseConfig);
     const chat = sentry.spans.find(s => s.attrs["gen_ai.operation.name"] === "chat");
-    expect(chat!.attrs["gen_ai.request.messages"]).toBeUndefined();
+    expect(chat!.attrs["gen_ai.input.messages"]).toBeUndefined();
   });
 
   it("omits claude_code.token_extraction.status when undefined", () => {
