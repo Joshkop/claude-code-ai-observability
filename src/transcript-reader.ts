@@ -29,6 +29,8 @@ export interface TranscriptReadResult {
 interface Line {
   type?: string;
   isSidechain?: boolean;
+  isMeta?: boolean;
+  is_meta?: boolean;
   promptId?: string;
   prompt_id?: string;
   permissionMode?: string;
@@ -85,6 +87,22 @@ function promptIdOf(l: Line): string | null {
   return l.promptId ?? l.prompt_id ?? null;
 }
 
+function isMetaOf(l: Line): boolean {
+  return l.isMeta === true || l.is_meta === true;
+}
+
+// Client-only slash commands like /model and /clear are surfaced in the
+// transcript as a synthetic user-line triple (<local-command-caveat>,
+// <command-name>, <local-command-stdout>) but never fire UserPromptSubmit,
+// so they must NOT count as real turns. Detect them by the unmistakable
+// <local-command-*> wrappers — these only appear on client-side commands;
+// model-bound slash commands (e.g. /superpowers:foo) have <command-name>
+// without any <local-command-*> sibling.
+function isLocalCommandText(text: string | null): boolean {
+  if (!text) return false;
+  return text.startsWith("<local-command-stdout>") || text.startsWith("<local-command-caveat>");
+}
+
 function collectSessionDims(l: Line, into: SessionDimensions): void {
   if (into.permissionMode === undefined) {
     into.permissionMode = l.permissionMode ?? l.permission_mode;
@@ -139,6 +157,22 @@ export function readTranscript(path: string): TranscriptReadResult {
     return legacyResult(path, "no recognizable transcript line types");
   }
 
+  // Pre-pass: any prompt_id that has at least one <local-command-*> line is
+  // a client-only slash command (/model, /clear, …). Every user line under
+  // that prompt_id must be excluded from real-turn segmentation; otherwise
+  // the synthetic triple bumps the real-turn ordinal off-by-N from the
+  // collector's turnIndex (which only counts true UserPromptSubmit events).
+  const clientOnlyPromptIds = new Set<string>();
+  for (const l of parsed) {
+    if (l.type !== "user") continue;
+    if (l.isSidechain === true) continue;
+    const pid = promptIdOf(l);
+    if (!pid) continue;
+    if (isLocalCommandText(textFromContent(l.message?.content))) {
+      clientOnlyPromptIds.add(pid);
+    }
+  }
+
   const turns: RealTurn[] = [];
   const byPromptId = new Map<string, RealTurn>();
   const session: SessionDimensions = {};
@@ -151,9 +185,17 @@ export function readTranscript(path: string): TranscriptReadResult {
     if (l.type === "user") {
       if (l.isSidechain === true) continue;
       if (isToolResultUserLine(l.message?.content)) continue;
+      // Skip caveat / meta lines — these are Claude Code annotations, not
+      // user input, and never fire UserPromptSubmit.
+      if (isMetaOf(l)) continue;
+      const pid = promptIdOf(l);
+      // Skip every line in a client-only slash-command group (see pre-pass).
+      if (pid && clientOnlyPromptIds.has(pid)) continue;
+      // Defensive: also skip a bare <local-command-*> line that somehow lacks
+      // a prompt_id (older Claude Code builds).
+      if (isLocalCommandText(textFromContent(l.message?.content))) continue;
       if (current) turns.push(current);
       realIndex += 1;
-      const pid = promptIdOf(l);
       current = emptyTurn(pid, realIndex);
       const t = textFromContent(l.message?.content);
       if (t) current.prompt = t;
