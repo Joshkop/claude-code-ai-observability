@@ -18,6 +18,7 @@ import {
   createToolSpan,
   openTurnTransaction,
   type CloseTurnInput,
+  type TurnSpans,
 } from "./spans.js";
 import { readTranscript, selectTurn } from "./transcript-reader.js";
 import { detectContext } from "./context.js";
@@ -36,7 +37,10 @@ import {
 type Span = ReturnType<typeof Sentry.startInactiveSpan>;
 
 interface SessionRecord {
-  currentTurnSpan: Span | null;
+  /** Pair of (transaction root, gen_ai.invoke_agent child). The root carries
+   *  per-turn attrs/aggregates; the child is what Sentry's AI Conversations
+   *  view extracts into its v2 standalone stream. Both end together. */
+  currentTurnSpans: TurnSpans | null;
   /** Unix-seconds start time of the current turn — used as the gen_ai.chat
    *  child span's startTime so it covers the same window as the parent. */
   currentTurnStart: number | null;
@@ -134,7 +138,7 @@ export function startServer(
   sentry: typeof Sentry,
   config: ResolvedPluginConfig,
   baseAutoTags: AutoTags,
-): { close: () => Promise<void>; emitHeartbeat: () => void; forceReap: () => void } {
+): { close: () => Promise<void>; emitHeartbeat: () => void; forceReap: () => Promise<void> } {
   const sessions = new Map<string, SessionRecord>();
   let droppedTotal = 0;
   const startedAt = Date.now();
@@ -162,7 +166,7 @@ export function startServer(
     // those win.
     applyClientContext(autoTags, event._aiobs?.context);
     sessions.set(event.session_id, {
-      currentTurnSpan: null,
+      currentTurnSpans: null,
       currentTurnStart: null,
       pendingTools: new Map(),
       toolCount: 0,
@@ -179,10 +183,10 @@ export function startServer(
     });
   };
 
-  const reapStaleSession = (sessionId: string, record: SessionRecord): void => {
-    sentry.withIsolationScope((scope) => {
+  const reapStaleSession = async (sessionId: string, record: SessionRecord): Promise<void> => {
+    await sentry.withIsolationScope(async (scope) => {
       scope.setConversationId(sessionId);
-      try { void closeCurrentTurn(record).catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      try { await closeCurrentTurn(record); } catch { /* ignore */ }
       for (const [, pending] of record.pendingTools) {
         try { pending.span.end(); } catch { /* ignore */ }
       }
@@ -192,7 +196,7 @@ export function startServer(
   };
 
   const closeCurrentTurn = async (record: SessionRecord): Promise<void> => {
-    if (!record.currentTurnSpan) return;
+    if (!record.currentTurnSpans) return;
     let tokens: CloseTurnInput["tokens"] = {
       turnIndex: record.turnIndex,
       inputTokens: 0,
@@ -252,27 +256,27 @@ export function startServer(
     );
     try {
       if (cost.unpricedModel) {
-        record.currentTurnSpan.setAttribute("claude_code.cost.unpriced_model", cost.unpricedModel);
+        record.currentTurnSpans.agent.setAttribute("claude_code.cost.unpriced_model", cost.unpricedModel);
       }
       if (parseDegraded) {
-        record.currentTurnSpan.setAttribute("claude_code.transcript.parse_degraded", true);
+        record.currentTurnSpans.agent.setAttribute("claude_code.transcript.parse_degraded", true);
       }
       if (record.synthesized) {
-        record.currentTurnSpan.setAttribute("claude_code.session.synthesized", true);
+        record.currentTurnSpans.agent.setAttribute("claude_code.session.synthesized", true);
       }
       if (sessionDims.permissionMode) {
-        record.currentTurnSpan.setAttribute("claude_code.permission_mode", sessionDims.permissionMode);
+        record.currentTurnSpans.agent.setAttribute("claude_code.permission_mode", sessionDims.permissionMode);
       }
       if (sessionDims.agentName) {
-        record.currentTurnSpan.setAttribute("claude_code.agent_name", sessionDims.agentName);
+        record.currentTurnSpans.agent.setAttribute("claude_code.agent_name", sessionDims.agentName);
       }
       if (sessionDims.entrypoint) {
-        record.currentTurnSpan.setAttribute("claude_code.entrypoint", sessionDims.entrypoint);
+        record.currentTurnSpans.agent.setAttribute("claude_code.entrypoint", sessionDims.entrypoint);
       }
     } catch { /* ignore */ }
     closeTurnSpan(
       sentry,
-      record.currentTurnSpan,
+      record.currentTurnSpans,
       {
         tokens,
         responseModel: record.responseModel ?? record.model,
@@ -287,7 +291,7 @@ export function startServer(
       },
       config,
     );
-    record.currentTurnSpan = null;
+    record.currentTurnSpans = null;
     record.currentTurnStart = null;
     record.currentPromptId = null;
     record.turnToolCount = 0;
@@ -308,7 +312,7 @@ export function startServer(
     if (existing) return existing;
     const cwd = event._aiobs?.context?.cwd;
     const record: SessionRecord = {
-      currentTurnSpan: null,
+      currentTurnSpans: null,
       currentTurnStart: null,
       pendingTools: new Map(),
       toolCount: 0,
@@ -341,7 +345,7 @@ export function startServer(
       record.currentPromptId = event.prompt_id ?? null;
       const prompt = event.prompt ?? event.message ?? null;
       record.currentTurnStart = Date.now() / 1000;
-      record.currentTurnSpan = openTurnTransaction(
+      record.currentTurnSpans = openTurnTransaction(
         sentry,
         event.session_id,
         record.turnIndex,
@@ -356,19 +360,19 @@ export function startServer(
       // loss is visible on the turn it actually precedes. No double count: only
       // the span attribute is repeated here, not droppedTotal/breadcrumb.
       const droppedNow = event._aiobs?.dropped_since_last;
-      if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpan) {
+      if (typeof droppedNow === "number" && droppedNow > 0 && record.currentTurnSpans) {
         try {
-          record.currentTurnSpan.setAttribute("claude_code.dropped_since_last", droppedNow);
+          record.currentTurnSpans.agent.setAttribute("claude_code.dropped_since_last", droppedNow);
         } catch { /* ignore */ }
       }
       // N2: a slash command in the prompt → command attribution on the turn.
       if (prompt) {
         const cmd = parseSlashCommand(prompt);
-        if (cmd && record.currentTurnSpan) {
+        if (cmd && record.currentTurnSpans) {
           try {
-            record.currentTurnSpan.setAttribute("claude_code.command.name", cmd.name);
+            record.currentTurnSpans.agent.setAttribute("claude_code.command.name", cmd.name);
             if (cmd.plugin) {
-              record.currentTurnSpan.setAttribute("claude_code.command.plugin", cmd.plugin);
+              record.currentTurnSpans.agent.setAttribute("claude_code.command.plugin", cmd.plugin);
             }
           } catch { /* ignore */ }
         }
@@ -382,7 +386,7 @@ export function startServer(
     // doesn't harvest it mid-flight. touchSession already bumped at the dispatcher,
     // but this is belt-and-suspenders in case the event shape ever loses session_id.
     record.lastEventAt = Date.now();
-    const parent = record.currentTurnSpan;
+    const parent = record.currentTurnSpans?.agent ?? null;
     if (
       attachSubagentToEvent(sentry, subagentSession, event, {
         parent: parent ?? undefined,
@@ -517,9 +521,9 @@ export function startServer(
     const dropped = event._aiobs?.dropped_since_last;
     if (typeof dropped === "number" && dropped > 0) {
       droppedTotal += dropped;
-      if (r.currentTurnSpan) {
+      if (r.currentTurnSpans) {
         try {
-          r.currentTurnSpan.setAttribute("claude_code.dropped_since_last", dropped);
+          r.currentTurnSpans.agent.setAttribute("claude_code.dropped_since_last", dropped);
         } catch { /* ignore */ }
       }
       captureDroppedBreadcrumb(sentry, {
@@ -652,7 +656,7 @@ export function startServer(
       const now = Date.now();
       for (const [sid, record] of sessions) {
         if (isStaleSession(record, now)) {
-          reapStaleSession(sid, record);
+          void reapStaleSession(sid, record).catch(() => { /* ignore */ });
         }
       }
       try { void sentry.flush(2000); } catch { /* ignore */ }
@@ -681,12 +685,15 @@ export function startServer(
   const shutdown = async (): Promise<void> => {
     if (flushTimer) clearInterval(flushTimer);
     if (reapTimer) clearInterval(reapTimer);
-    for (const [, record] of sessions) {
+    for (const [sid, record] of sessions) {
       try {
-        closeCurrentTurn(record);
-        for (const [, pending] of record.pendingTools) {
-          try { pending.span.end(); } catch { /* ignore */ }
-        }
+        await sentry.withIsolationScope(async (scope) => {
+          scope.setConversationId(sid);
+          await closeCurrentTurn(record);
+          for (const [, pending] of record.pendingTools) {
+            try { pending.span.end(); } catch { /* ignore */ }
+          }
+        });
       } catch { /* ignore */ }
     }
     sessions.clear();
@@ -701,10 +708,12 @@ export function startServer(
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
-  const forceReap = (): void => {
+  const forceReap = async (): Promise<void> => {
+    const pending: Array<Promise<void>> = [];
     for (const [sid, record] of sessions) {
-      reapStaleSession(sid, record);
+      pending.push(reapStaleSession(sid, record));
     }
+    await Promise.all(pending);
   };
 
   return { close: shutdown, emitHeartbeat, forceReap };

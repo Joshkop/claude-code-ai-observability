@@ -55,82 +55,94 @@ const baseTags: AutoTags = {
 };
 
 describe("openTurnTransaction attribute contract", () => {
-  it("uses op=gen_ai.invoke_agent and forceTransaction=true", () => {
+  it("emits two spans: a claude_code.turn transaction root and a gen_ai.invoke_agent child", () => {
     const sentry = makeFakeSentry();
     openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
-    expect(sentry.startCalls).toHaveLength(1);
-    expect(sentry.startCalls[0].op).toBe("gen_ai.invoke_agent");
-    expect(sentry.startCalls[0].name).toBe("invoke_agent claude-code");
+    expect(sentry.startCalls).toHaveLength(2);
+    expect(sentry.startCalls[0].op).toBe("claude_code.turn");
     expect(sentry.startCalls[0].forceTransaction).toBe(true);
+    expect(sentry.startCalls[1].op).toBe("gen_ai.invoke_agent");
+    expect(sentry.startCalls[1].name).toBe("invoke_agent claude-code");
+    // The invoke_agent span MUST NOT be its own transaction — Sentry's
+    // extractGenAiSpansFromEvent only extracts descendants of a transaction
+    // into the v2 standalone stream that AI Conversations reads.
+    expect(sentry.startCalls[1].forceTransaction).toBeUndefined();
   });
 
-  it("sets gen_ai.operation.name=invoke_agent", () => {
+  it("sets gen_ai.operation.name=invoke_agent on the agent span", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.operation.name"]).toBe("invoke_agent");
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.operation.name"]).toBe("invoke_agent");
   });
 
-  it("sets gen_ai.provider.name + legacy gen_ai.system + gen_ai.agent.name", () => {
+  it("sets gen_ai.provider.name + gen_ai.agent.name on the agent span (no legacy gen_ai.system)", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-sonnet-4-6");
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.provider.name"]).toBe("anthropic");
-    expect(span.attrs["gen_ai.system"]).toBe("anthropic");
-    expect(span.attrs["gen_ai.agent.name"]).toBe("claude-code");
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.provider.name"]).toBe("anthropic");
+    expect(agent.attrs["gen_ai.agent.name"]).toBe("claude-code");
+    // gen_ai.system was deprecated by Sentry in favor of gen_ai.provider.name
+    // and is stripped server-side. Don't emit it.
+    expect(agent.attrs["gen_ai.system"]).toBeUndefined();
   });
 
-  it("sets gen_ai.conversation.id to the session id for cross-turn grouping", () => {
+  it("sets gen_ai.conversation.id on BOTH root and agent spans (root row + v2 standalone grouping)", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-conv-1", 0, null, baseTags, baseConfig);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.conversation.id"]).toBe("sess-conv-1");
+    const root = turn.root as unknown as ReturnType<typeof makeFakeSpan>;
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(root.attrs["gen_ai.conversation.id"]).toBe("sess-conv-1");
+    expect(agent.attrs["gen_ai.conversation.id"]).toBe("sess-conv-1");
   });
 
-  it("sets claude_code.session_id and claude_code.turn_index", () => {
+  it("sets claude_code.session_id and claude_code.turn_index on both spans", () => {
     const sentry = makeFakeSentry();
     const tags: AutoTags = { ...baseTags, "claude_code.session_id": "sess-xyz" };
     const turn = openTurnTransaction(sentry as never, "sess-xyz", 3, null, tags, baseConfig);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["claude_code.session_id"]).toBe("sess-xyz");
-    expect(span.attrs["claude_code.turn_index"]).toBe(3);
+    const root = turn.root as unknown as ReturnType<typeof makeFakeSpan>;
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(root.attrs["claude_code.session_id"]).toBe("sess-xyz");
+    expect(root.attrs["claude_code.turn_index"]).toBe(3);
+    expect(agent.attrs["claude_code.session_id"]).toBe("sess-xyz");
+    expect(agent.attrs["claude_code.turn_index"]).toBe(3);
   });
 
-  it("sets gen_ai.request.model when model is provided", () => {
+  it("sets gen_ai.request.model on the agent span when model is provided", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig, "claude-opus-4-7");
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.request.model"]).toBe("claude-opus-4-7");
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.request.model"]).toBe("claude-opus-4-7");
   });
 
   it("does not set gen_ai.request.model when model is absent", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.request.model"]).toBeUndefined();
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.request.model"]).toBeUndefined();
   });
 
-  it("applies auto-tags onto the turn transaction", () => {
+  it("applies auto-tags onto the transaction root", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["host.name"]).toBe("testhost");
-    expect(span.attrs["process.pid"]).toBe(1234);
+    const root = turn.root as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(root.attrs["host.name"]).toBe("testhost");
+    expect(root.attrs["process.pid"]).toBe(1234);
   });
 
-  it("attaches gen_ai.request.messages when recordInputs is true and prompt provided", () => {
+  it("attaches gen_ai.request.messages to the agent span when recordInputs is true and prompt provided", () => {
     const sentry = makeFakeSentry();
     const cfg: ResolvedPluginConfig = { ...baseConfig, recordInputs: true };
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, "hello world", baseTags, cfg);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.request.messages"]).toBeDefined();
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.request.messages"]).toBeDefined();
   });
 
   it("does not attach gen_ai.request.messages when recordInputs is false", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, "hello world", baseTags, baseConfig);
-    const span = turn as unknown as ReturnType<typeof makeFakeSpan>;
-    expect(span.attrs["gen_ai.request.messages"]).toBeUndefined();
+    const agent = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
+    expect(agent.attrs["gen_ai.request.messages"]).toBeUndefined();
   });
 });
 
@@ -174,7 +186,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("does NOT put token attributes on the invoke_agent root (they live on the chat child)", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens() }, baseConfig);
 
@@ -197,7 +209,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("sets gen_ai.response.model from tokens.model", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens({ model: "claude-opus-4-7" }) }, baseConfig);
 
@@ -207,7 +219,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("sets gen_ai.response.model from responseModel when provided", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens({ model: null }), responseModel: "claude-haiku-4-5-20251001" }, baseConfig);
 
@@ -217,7 +229,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("sets conversation.cost_estimate_usd rollup when cost is provided", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(
       sentry as never,
@@ -235,7 +247,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("does not emit per-bucket gen_ai.usage.cost.* — Sentry has no such convention", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(
       sentry as never,
@@ -255,7 +267,7 @@ describe("closeTurnSpan attribute contract", () => {
   it("does not emit conversation.cost_estimate_usd when cost is absent", () => {
     const sentry = makeFakeSentry();
     const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
-    const turnSpan = turn as unknown as ReturnType<typeof makeFakeSpan>;
+    const turnSpan = turn.agent as unknown as ReturnType<typeof makeFakeSpan>;
 
     closeTurnSpan(sentry as never, turn as never, { tokens: makeTokens() }, baseConfig);
 
@@ -337,11 +349,11 @@ describe("closeTurnSpan attribute contract", () => {
 describe("C2 — input_tokens includes cached (Sentry schema)", () => {
   it("input_tokens is the full input including cached + cache_write; total_tokens is input + output", () => {
     const sentry = makeFakeSentry();
-    const turnSpan = makeFakeSpan();
+    const turn = { root: makeFakeSpan(), agent: makeFakeSpan() };
     const cfg = { recordInputs: false, recordOutputs: false, maxAttributeLength: 1000, tags: {} } as never;
     closeTurnSpan(
       sentry as never,
-      turnSpan as never,
+      turn as never,
       {
         tokens: {
           turnIndex: 0, inputTokens: 100, outputTokens: 40,
@@ -363,9 +375,9 @@ describe("C2 — input_tokens includes cached (Sentry schema)", () => {
 describe("createToolSpan parent behavior", () => {
   it("creates a child tool span when a parent is provided", () => {
     const sentry = makeFakeSentry();
-    const parent = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
+    const turn = openTurnTransaction(sentry as never, "sess-1", 0, null, baseTags, baseConfig);
     sentry.startCalls.length = 0; // reset to inspect just the tool span call
-    createToolSpan(sentry as never, parent, "Bash", { command: "ls" }, baseConfig);
+    createToolSpan(sentry as never, turn.agent, "Bash", { command: "ls" }, baseConfig);
     expect(sentry.startCalls).toHaveLength(1);
     expect(sentry.startCalls[0].op).toBe("gen_ai.execute_tool");
     expect(sentry.startCalls[0].forceTransaction).toBeUndefined();

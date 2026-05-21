@@ -12,14 +12,23 @@ interface FakeSpan {
   op?: string;
   name?: string;
   forceTransaction?: boolean;
+  // Captured at end() time so tests can verify that span emission happened
+  // inside the expected Sentry isolation scope (and not after it exited).
+  endedUnderConversationId?: string | null | undefined;
 }
 
 function makeFakeSentry() {
   const spans: FakeSpan[] = [];
   const conversationIdCalls: Array<string | null | undefined> = [];
+  // Simple stack model of the active isolation scope. Real Sentry uses
+  // AsyncLocalStorage; this stack is enough to catch the "scope already
+  // exited" class of bug where async work escapes the withIsolationScope
+  // callback before completing.
+  let activeConversationId: string | null | undefined = undefined;
   return {
     spans,
     conversationIdCalls,
+    get activeConversationId() { return activeConversationId; },
     startInactiveSpan(opts: {
       op?: string;
       name?: string;
@@ -37,19 +46,35 @@ function makeFakeSentry() {
       return {
         setAttribute(k: string, v: unknown) { span.attrs[k] = v; },
         setStatus() {},
-        end() { span.ended = true; },
+        end() {
+          span.ended = true;
+          span.endedUnderConversationId = activeConversationId;
+        },
       };
     },
     withActiveSpan<T>(_parent: unknown, fn: () => T): T {
       return fn();
     },
     withIsolationScope<T>(fn: (scope: { setConversationId(id: string | null | undefined): void }) => T): T {
+      const previous = activeConversationId;
       const scope = {
         setConversationId: (id: string | null | undefined) => {
           conversationIdCalls.push(id);
+          activeConversationId = id;
         },
       };
-      return fn(scope);
+      const restore = (): void => { activeConversationId = previous; };
+      try {
+        const result = fn(scope);
+        if (result && typeof (result as { then?: unknown }).then === "function") {
+          return (result as unknown as Promise<unknown>).finally(restore) as unknown as T;
+        }
+        restore();
+        return result;
+      } catch (e) {
+        restore();
+        throw e;
+      }
     },
     flush: async () => true,
   };
@@ -137,8 +162,11 @@ describe("server lifecycle: per-turn transaction model", () => {
       prompt: "first prompt",
     });
     expect(r.ok).toBe(true);
+    // The transaction root is the claude_code.turn wrapper; gen_ai.invoke_agent
+    // is a child so Sentry's extractGenAiSpansFromEvent picks it up into the
+    // v2 standalone stream that AI Conversations reads from.
     const turnTransactions = () =>
-      sentry.spans.filter((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      sentry.spans.filter((s) => s.op === "claude_code.turn" && s.forceTransaction === true);
     expect(turnTransactions()).toHaveLength(1);
     expect(turnTransactions()[0].attrs["claude_code.turn_index"]).toBe(0);
     expect(turnTransactions()[0].attrs["claude_code.session_id"]).toBe(sessionId);
@@ -280,9 +308,9 @@ describe("server: per-session git cwd (C4)", () => {
       });
       await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "c4", prompt: "hi" });
 
-      const turn = sentry.spans.find(
-        (s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true,
-      );
+      // Auto-tags live on the transaction root (claude_code.turn), not the
+      // gen_ai.invoke_agent child — keeps the v2 standalone span lean.
+      const turn = sentry.spans.find((s) => s.op === "claude_code.turn");
       expect(turn).toBeTruthy();
       expect(turn!.attrs["vcs.ref.head.name"]).toBe(branch);
     } finally {
@@ -320,7 +348,7 @@ describe("server: lazy session synthesis (R2)", () => {
       // NOTE: NO SessionStart dispatched.
       await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "go", prompt_id: "P1", _aiobs: { context: { cwd: dir } } });
       await postHook(port, { hook_event_name: "SessionEnd", session_id: "s", transcript_path: tx });
-      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+      const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
       expect(turn).toBeTruthy();
       expect(turn!.attrs["claude_code.session.synthesized"]).toBe(true);
     } finally {
@@ -352,7 +380,7 @@ describe("server: dropped attr + heartbeat (R3/R4)", () => {
       hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "x",
       _aiobs: { dropped_since_last: 4 },
     });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.dropped_since_last"]).toBe(4);
   });
@@ -425,7 +453,7 @@ describe("server: slash-command attribution (N2)", () => {
   it("sets claude_code.command.name/plugin from a namespaced command", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sc" });
     await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc", prompt: "/superpowers:writing-plans go" });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.command.name"]).toBe("writing-plans");
     expect(turn!.attrs["claude_code.command.plugin"]).toBe("superpowers");
@@ -434,7 +462,7 @@ describe("server: slash-command attribution (N2)", () => {
   it("does not set command attrs for a normal prompt", async () => {
     await postHook(port, { hook_event_name: "SessionStart", session_id: "sc2" });
     await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sc2", prompt: "just a normal prompt" });
-    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent" && s.forceTransaction === true);
+    const turn = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
     expect(turn).toBeTruthy();
     expect(turn!.attrs["claude_code.command.name"]).toBeUndefined();
   });
@@ -697,8 +725,63 @@ describe("server: reapStaleSession conversation scope", () => {
       });
       const beforeReap = sentry.conversationIdCalls.length;
       // forceReap reaps all active sessions regardless of idle time
-      server.forceReap();
+      await server.forceReap();
       expect(sentry.conversationIdCalls.slice(beforeReap)).toContain("sess-stale");
+    } finally {
+      await server.close();
+      delete process.env.SENTRY_COLLECTOR_PORT;
+    }
+  });
+
+  // Regression: reapStaleSession used to fire-and-forget the async
+  // closeCurrentTurn inside a sync withIsolationScope callback, so the
+  // turn span's end() ran after the isolation scope had already exited.
+  // The fix awaits closeCurrentTurn inside an async scope callback.
+  it("reapStaleSession: turn span end() happens inside the conversation scope", async () => {
+    const port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    const sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    try {
+      for (let i = 0; i < 25; i++) {
+        try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await postHook(port, {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "sess-scoped",
+        prompt: "hi",
+      });
+      await server.forceReap();
+      const turnSpan = sentry.spans.find((s) => s.op === "gen_ai.invoke_agent");
+      expect(turnSpan).toBeDefined();
+      expect(turnSpan!.ended).toBe(true);
+      expect(turnSpan!.endedUnderConversationId).toBe("sess-scoped");
+    } finally {
+      await server.close();
+      delete process.env.SENTRY_COLLECTOR_PORT;
+    }
+  });
+
+  // Concurrent sessions: two overlapping reaps must each tag their own
+  // turn span with their own session_id, never cross-contaminate.
+  it("reapStaleSession: concurrent sessions keep their own conversation IDs", async () => {
+    const port = await findFreePort();
+    process.env.SENTRY_COLLECTOR_PORT = String(port);
+    const sentry = makeFakeSentry();
+    const server = startServer(sentry as never, baseConfig, baseTags);
+    try {
+      for (let i = 0; i < 25; i++) {
+        try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) break; } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sess-A", prompt: "a" });
+      await postHook(port, { hook_event_name: "UserPromptSubmit", session_id: "sess-B", prompt: "b" });
+      await server.forceReap();
+      const turnSpans = sentry.spans.filter((s) => s.op === "gen_ai.invoke_agent");
+      expect(turnSpans.length).toBe(2);
+      const tagged = turnSpans.map((s) => s.endedUnderConversationId).sort();
+      expect(tagged).toEqual(["sess-A", "sess-B"]);
     } finally {
       await server.close();
       delete process.env.SENTRY_COLLECTOR_PORT;
