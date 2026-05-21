@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.12] - 2026-05-21
+
+### Fixed
+
+- **AI Conversations: inputs and outputs now align with the right turn.** Claude Code's transcript records client-only slash commands like `/model` and `/clear` as a synthetic user-line triple (`<local-command-caveat>`, `<command-name>`, `<local-command-stdout>`), and Claude Code does not fire `UserPromptSubmit` for them. The transcript reader was counting every one of those lines as a real turn, so the collector's `turnIndex` (which only counts real `UserPromptSubmit` events) drifted off-by-N from the transcript's real-turn ordinal. Because real `UserPromptSubmit` hook payloads don't carry `prompt_id`, `selectTurn` fell back to ordinal — and the ordinal pointed at the wrong transcript turn. Visible symptom: early turns showed `gen_ai.input.messages` but the chat span had no `gen_ai.output.messages` (`claude_code.usage_extraction.status = turn_had_no_usage`), and a later turn carried an *earlier* turn's response (e.g. turn 3's chat span output was actually the assistant response to turn 0). `readTranscript` now skips `isMeta:true` lines and every user line belonging to a prompt_id that has any `<local-command-*>` content, restoring 1:1 alignment with `UserPromptSubmit`. Defense-in-depth: `UserPromptSubmit` events are now read from both `prompt_id` and `promptId`.
+
 ## [0.2.11] - 2026-05-21
 
 ### Fixed

@@ -117,8 +117,10 @@ export interface UserPromptSubmitEvent extends AiobsEnvelope {
   message?: string;
   /** C1: stable id of this prompt, used to correlate the collector's open
    *  turn to the transcript's real-turn line. Optional — absent on older
-   *  Claude Code; collector falls back to ordinal among real turns. */
+   *  Claude Code; collector falls back to ordinal among real turns. Some
+   *  builds emit camelCase `promptId`, so both are accepted at read time. */
   prompt_id?: string;
+  promptId?: string;
 }
 
 export interface PreToolUseEvent extends AiobsEnvelope {

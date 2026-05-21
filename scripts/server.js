@@ -311,7 +311,7 @@ export function startServer(sentry, config, baseAutoTags) {
         const record = getOrCreateSession(event);
         void closeCurrentTurn(record).then(() => {
             record.turnIndex += 1;
-            record.currentPromptId = event.prompt_id ?? null;
+            record.currentPromptId = event.prompt_id ?? event.promptId ?? null;
             const prompt = event.prompt ?? event.message ?? null;
             record.currentTurnPrompt = prompt;
             record.currentTurnStart = Date.now() / 1000;

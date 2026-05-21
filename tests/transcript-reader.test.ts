@@ -56,6 +56,44 @@ describe("readTranscript — turn segmentation (C1)", () => {
   });
 });
 
+describe("readTranscript — synthetic slash-command lines do not count as real turns", () => {
+  // Claude Code emits synthetic user lines for client-only slash commands like
+  // /model and /clear — typically a triple: <local-command-caveat> (isMeta:true),
+  // <command-name>/foo, <local-command-stdout>. These never fire UserPromptSubmit,
+  // so they must be excluded from the real-turn index, or the collector's
+  // turnIndex (which counts UserPromptSubmit events) drifts off-by-N from
+  // transcript ordinals and selectTurn returns the wrong turn.
+  it("skips /model-style synthetic triples and aligns ordinals with real prompts", () => {
+    const p = make(
+      [
+        // /model client-only command: 3 synthetic user lines sharing one promptId
+        JSON.stringify({ type: "user", isMeta: true, promptId: "cmd1", message: { content: "<local-command-caveat>Caveat: ...</local-command-caveat>" } }),
+        JSON.stringify({ type: "user", promptId: "cmd1", message: { content: "<command-name>/model</command-name>\n<command-args></command-args>" } }),
+        JSON.stringify({ type: "user", promptId: "cmd1", message: { content: "<local-command-stdout>Set model to Sonnet</local-command-stdout>" } }),
+        // First real prompt — UserPromptSubmit would fire here, collector turnIndex=0
+        JSON.stringify({ type: "user", promptId: "real1", message: { content: "Hello how are you" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 100, output_tokens: 10 }, content: [{ type: "text", text: "Doing well, thanks!" }] } }),
+        // Second real prompt — collector turnIndex=1
+        JSON.stringify({ type: "user", promptId: "real2", message: { content: "another reply please" } }),
+        JSON.stringify({ type: "assistant", message: { model: "m", usage: { input_tokens: 200, output_tokens: 20 }, content: [{ type: "text", text: "Here you go." }] } }),
+      ].join("\n"),
+    );
+    const r = readTranscript(p);
+    expect(r.degraded).toBe(false);
+    // Only 2 REAL turns — the 3 /model synthetic lines collapse to 0.
+    expect(r.turns).toHaveLength(2);
+    // Ordinal 0 must be "Hello", not the caveat — this is what selectTurn
+    // returns when UserPromptSubmit lacks prompt_id and falls back to ordinal.
+    expect(r.turns[0].promptId).toBe("real1");
+    expect(r.turns[0].response).toBe("Doing well, thanks!");
+    expect(r.turns[1].promptId).toBe("real2");
+    expect(r.turns[1].response).toBe("Here you go.");
+    // byPromptId must NOT contain the synthetic prompt_id at all.
+    expect(r.byPromptId.has("cmd1")).toBe(false);
+    expect(selectTurn(r, undefined, 0).turn!.response).toBe("Doing well, thanks!");
+  });
+});
+
 describe("readTranscript — missing/empty file is not parse-degraded", () => {
   it("missing file → empty turns, degraded false (not format drift)", () => {
     const r = readTranscript("/tmp/__aiobs_no_such_transcript__.jsonl");
