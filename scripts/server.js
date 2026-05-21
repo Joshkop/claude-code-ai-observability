@@ -111,6 +111,7 @@ export function startServer(sentry, config, baseAutoTags) {
         sessions.set(event.session_id, {
             currentTurnSpans: null,
             currentTurnStart: null,
+            currentTurnPrompt: null,
             pendingTools: new Map(),
             toolCount: 0,
             turnToolCount: 0,
@@ -235,9 +236,11 @@ export function startServer(sentry, config, baseAutoTags) {
             subagentCount: record.turnSubagentCount,
             toolsUsed: Array.from(record.turnTools),
             tokenExtractionStatus,
+            prompt: record.currentTurnPrompt,
         }, config);
         record.currentTurnSpans = null;
         record.currentTurnStart = null;
+        record.currentTurnPrompt = null;
         record.currentPromptId = null;
         record.turnToolCount = 0;
         record.turnSubagentCount = 0;
@@ -259,6 +262,7 @@ export function startServer(sentry, config, baseAutoTags) {
         const record = {
             currentTurnSpans: null,
             currentTurnStart: null,
+            currentTurnPrompt: null,
             pendingTools: new Map(),
             toolCount: 0,
             turnToolCount: 0,
@@ -288,6 +292,7 @@ export function startServer(sentry, config, baseAutoTags) {
             record.turnIndex += 1;
             record.currentPromptId = event.prompt_id ?? null;
             const prompt = event.prompt ?? event.message ?? null;
+            record.currentTurnPrompt = prompt;
             record.currentTurnStart = Date.now() / 1000;
             record.currentTurnSpans = openTurnTransaction(sentry, event.session_id, record.turnIndex, prompt, record.autoTags, config, record.model);
             // R3: touchSession already counted droppedTotal + emitted the breadcrumb

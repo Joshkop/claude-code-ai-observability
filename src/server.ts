@@ -44,6 +44,10 @@ interface SessionRecord {
   /** Unix-seconds start time of the current turn — used as the gen_ai.chat
    *  child span's startTime so it covers the same window as the parent. */
   currentTurnStart: number | null;
+  /** Original user prompt for the current turn. Mirrored onto the chat child
+   *  at closeTurnSpan so the chat span carries both input and output — the
+   *  shape Sentry's AI Conversations endpoint base filter requires. */
+  currentTurnPrompt: string | null;
   pendingTools: Map<string, { span: Span; startedAt: number; toolName: string }>;
   toolCount: number;
   /** Per-turn tool / subagent counters and tool-name set. Reset on new turn. */
@@ -168,6 +172,7 @@ export function startServer(
     sessions.set(event.session_id, {
       currentTurnSpans: null,
       currentTurnStart: null,
+      currentTurnPrompt: null,
       pendingTools: new Map(),
       toolCount: 0,
       turnToolCount: 0,
@@ -288,11 +293,13 @@ export function startServer(
         subagentCount: record.turnSubagentCount,
         toolsUsed: Array.from(record.turnTools),
         tokenExtractionStatus,
+        prompt: record.currentTurnPrompt,
       },
       config,
     );
     record.currentTurnSpans = null;
     record.currentTurnStart = null;
+    record.currentTurnPrompt = null;
     record.currentPromptId = null;
     record.turnToolCount = 0;
     record.turnSubagentCount = 0;
@@ -314,6 +321,7 @@ export function startServer(
     const record: SessionRecord = {
       currentTurnSpans: null,
       currentTurnStart: null,
+      currentTurnPrompt: null,
       pendingTools: new Map(),
       toolCount: 0,
       turnToolCount: 0,
@@ -344,6 +352,7 @@ export function startServer(
       record.turnIndex += 1;
       record.currentPromptId = event.prompt_id ?? null;
       const prompt = event.prompt ?? event.message ?? null;
+      record.currentTurnPrompt = prompt;
       record.currentTurnStart = Date.now() / 1000;
       record.currentTurnSpans = openTurnTransaction(
         sentry,

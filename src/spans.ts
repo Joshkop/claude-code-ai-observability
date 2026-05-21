@@ -94,6 +94,13 @@ export interface CloseTurnInput {
   /** Diagnostic: why per-turn tokens were or were not extracted from transcript.
    *  See spec docs/superpowers/specs/2026-05-20-collector-self-heal-and-zero-cost-diagnostics-design.md */
   tokenExtractionStatus?: string;
+  /** Original user prompt for this turn. Sentry's AI Conversations endpoint
+   *  filters for spans that carry input AND output messages together, so the
+   *  prompt must be mirrored onto the chat child (which already holds the
+   *  response). Without this the chat span has output but no input, the
+   *  agent span has input but no output, and no single span satisfies the
+   *  base filter — Conversations stays empty. */
+  prompt?: string | null;
 }
 
 export function closeTurnSpan(
@@ -104,7 +111,7 @@ export function closeTurnSpan(
   endTime?: number,
 ): void {
   const { root: rootSpan, agent: turnSpan } = turnSpans;
-  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus } = input;
+  const { tokens, responseModel, cost, response, turnStartTime, sessionId, toolCount, subagentCount, toolsUsed, tokenExtractionStatus, prompt } = input;
   const respModel = responseModel ?? tokens.model ?? undefined;
 
   // Sentry's "AI Agents → Tokens Used" widget filters by op=gen_ai.chat;
@@ -155,6 +162,15 @@ export function closeTurnSpan(
         true,
       );
     }
+  }
+  if (config.recordInputs && prompt) {
+    chatSpan.setAttribute(
+      "gen_ai.request.messages",
+      serialize(
+        [{ role: "user", content: prompt }],
+        config.maxAttributeLength,
+      ),
+    );
   }
   if (config.recordOutputs && response) {
     chatSpan.setAttribute(

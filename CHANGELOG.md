@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.8] - 2026-05-21
+
+### Fixed
+
+- **Sentry Conversations view now actually populates (third time's the charm).** 0.2.5/0.2.6/0.2.7 each unblocked one layer (SDK option, scope propagation, descendant extraction), but the view still came up empty because Sentry's `OrganizationAIConversationsEndpoint` applies a base filter that requires `gen_ai.conversation.id` AND an input-messages attribute AND an output-messages attribute on the **same** span. Our pipeline split them: the `gen_ai.invoke_agent` span carried `gen_ai.request.messages`; the `gen_ai.chat` child carried `gen_ai.response.text`. Neither span satisfied the triple. The chat child now mirrors the user prompt as `gen_ai.request.messages` alongside the existing `gen_ai.response.text`, so one span per turn matches the filter and the conversation row appears. Subagent and tool spans group under the same conversation via shared `gen_ai.conversation.id`.
+
 ## [0.2.6] - 2026-05-20
 
 ### Fixed
